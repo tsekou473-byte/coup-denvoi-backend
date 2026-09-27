@@ -75,13 +75,20 @@ app.get('/api/fixtures', async (req, res) => {
     // La forme exacte des champs peut varier légèrement selon l'action —
     // on couvre les variantes de noms les plus courantes pour cette API.
     const list = Array.isArray(raw) ? raw : (raw.result || raw.events || []);
+    const now = new Date();
     const games = list.map(item => {
-      const hs = item.match_hometeam_score ?? item.match_hometeam_score_ft ?? null;
-      const as = item.match_awayteam_score ?? item.match_awayteam_score_ft ?? null;
-      const statusRaw = (item.match_status || '').toString().trim();
-      const status = statusRaw === 'FT' ? 'final'
-                    : statusRaw === '' ? 'scheduled'
-                    : 'live';
+      const hs = item.match_hometeam_score ?? null;
+      const as = item.match_awayteam_score ?? null;
+
+      let status = 'scheduled';
+      if (item.match_date && item.match_time) {
+        const kickoff = new Date(`${item.match_date}T${item.match_time}:00Z`);
+        const twoHoursAfter = new Date(kickoff.getTime() + 2 * 60 * 60 * 1000);
+        if (now > twoHoursAfter) status = 'final';
+        else if (now > kickoff) status = 'live';
+        else status = 'scheduled';
+      }
+
       return {
         id: item.match_id,
         status,
