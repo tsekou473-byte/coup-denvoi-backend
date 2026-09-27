@@ -21,6 +21,16 @@ if (!RAPIDAPI_KEY) {
   console.warn('⚠️  RAPIDAPI_KEY manquante — ajoute-la dans les variables d\'environnement.');
 }
 
+// Championnats "Coup d'Envoi" — league_id propres à cette API (ApiFootball3)
+const LEAGUES = {
+  PL:   { id: '152', name: 'Premier League' },
+  LIGA: { id: '302', name: 'La Liga' },
+  L1:   { id: '168', name: 'Ligue 1' },
+  BL:   { id: '175', name: 'Bundesliga' },
+  SA:   { id: '207', name: 'Serie A' },
+  LDC:  { id: '3',   name: 'UEFA Champions League' }
+};
+
 // Cache mémoire très simple : { clé: { data, expiresAt } }
 const cache = new Map();
 const CACHE_TTL_MS = 60 * 1000; // 60 secondes
@@ -49,10 +59,12 @@ async function cachedFetch(url) {
   return data;
 }
 
-// GET /api/fixtures?league_id=633&from=2026-09-20&to=2026-09-27
-// Sans dates, on prend par défaut les 7 derniers jours à J+7.
-// league_id dépend du référentiel de CETTE api (différent d'API-Football classique) —
-// utilise get_leagues (à ajouter plus tard) pour trouver le bon id, ou laisse vide pour tout voir.
+app.get('/api/leagues', (req, res) => {
+  res.json(Object.entries(LEAGUES).map(([code, l]) => ({ code, ...l })));
+});
+
+// GET /api/fixtures?comp=PL&from=2026-09-20&to=2026-09-27
+// comp: PL, LIGA, L1, BL, SA, LDC (voir /api/leagues) — sans comp, toutes ligues confondues.
 app.get('/api/fixtures', async (req, res) => {
   try {
     const today = new Date();
@@ -61,13 +73,16 @@ app.get('/api/fixtures', async (req, res) => {
     const fmt = d => d.toISOString().slice(0, 10);
 
     const {
+      comp,
       league_id,
       from = fmt(weekAgo),
       to = fmt(weekAhead)
     } = req.query;
 
+    const resolvedLeagueId = league_id || (comp && LEAGUES[comp.toUpperCase()]?.id);
+
     const params = new URLSearchParams({ action: 'get_events', from, to });
-    if (league_id) params.set('league_id', league_id);
+    if (resolvedLeagueId) params.set('league_id', resolvedLeagueId);
 
     const url = `https://${RAPIDAPI_HOST}/?${params.toString()}`;
     const raw = await cachedFetch(url);
