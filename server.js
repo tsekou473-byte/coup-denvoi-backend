@@ -1,7 +1,7 @@
 // Backend "Coup d'Envoi" — proxy + cache pour API-Football (RapidAPI)
 // -------------------------------------------------------------------
 // Ce serveur fait 3 choses :
-// 1. Cache les Ã©tés API pour éviter de dépasser ton quota gratuit (RapidAPI)
+// 1. Cache les appels API pour éviter de dépasser ton quota gratuit (RapidAPI)
 // 2. Cache les réponses en mémoire (60s par défaut) pour économiser tes requêtes
 // 3. Simplifie les données renvoyées pour qu'elles collent au format utilisé par l'app
 
@@ -37,10 +37,14 @@ async function cachedFetch(url) {
       'X-RapidAPI-Host': RAPIDAPI_HOST
     }
   });
+  const bodyText = await res.text();
   if (!res.ok) {
-    throw new Error(`API-Football a répondu ${res.status}`);
+    const err = new Error(`API-Football a répondu ${res.status}: ${bodyText.slice(0, 300)}`);
+    err.status = res.status;
+    err.body = bodyText;
+    throw err;
   }
-  const data = await res.json();
+  const data = JSON.parse(bodyText);
   cache.set(url, { data, expiresAt: now + CACHE_TTL_MS });
   return data;
 }
@@ -75,7 +79,10 @@ app.get('/api/fixtures', async (req, res) => {
     res.json({ games, cached: true, count: games.length });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Erreur lors de la récupération des matchs.' });
+    res.status(500).json({
+      error: 'Erreur lors de la récupération des matchs.',
+      detail: err.message || String(err)
+    });
   }
 });
 
