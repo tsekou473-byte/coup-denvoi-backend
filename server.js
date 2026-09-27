@@ -1,7 +1,7 @@
 // Backend "Coup d'Envoi" — proxy + cache pour API-Football (RapidAPI)
 // -------------------------------------------------------------------
 // Ce serveur fait 3 choses :
-// 1. Cache les appels API pour éviter de dépasser ton quota gratuit (RapidAPI)
+// 1. Cache les Ã©tés API pour éviter de dépasser ton quota gratuit (RapidAPI)
 // 2. Cache les réponses en mémoire (60s par défaut) pour économiser tes requêtes
 // 3. Simplifie les données renvoyées pour qu'elles collent au format utilisé par l'app
 
@@ -15,7 +15,7 @@ app.use(cors()); // autorise ton app/frontend à appeler ce backend
 
 const PORT = process.env.PORT || 3000;
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY; // ta clé, jamais dans le code ni le frontend
-const RAPIDAPI_HOST = 'api-football-v1.p.rapidapi.com';
+const RAPIDAPI_HOST = 'apifootball3.p.rapidapi.com';
 
 if (!RAPIDAPI_KEY) {
   console.warn('⚠️  RAPIDAPI_KEY manquante — ajoute-la dans les variables d\'environnement.');
@@ -49,34 +49,53 @@ async function cachedFetch(url) {
   return data;
 }
 
-// GET /api/fixtures?league=39&season=2026&date=2026-09-27
-// league=39 correspond à la Premier League sur API-Football (à vérifier/adapter)
+// GET /api/fixtures?league_id=633&from=2026-09-20&to=2026-09-27
+// Sans dates, on prend par défaut les 7 derniers jours à J+7.
+// league_id dépend du référentiel de CETTE api (différent d'API-Football classique) —
+// utilise get_leagues (à ajouter plus tard) pour trouver le bon id, ou laisse vide pour tout voir.
 app.get('/api/fixtures', async (req, res) => {
   try {
-    const { league = '39', season = '2026', date } = req.query;
-    const params = new URLSearchParams({ league, season });
-    if (date) params.set('date', date);
+    const today = new Date();
+    const weekAgo = new Date(today); weekAgo.setDate(today.getDate() - 7);
+    const weekAhead = new Date(today); weekAhead.setDate(today.getDate() + 7);
+    const fmt = d => d.toISOString().slice(0, 10);
 
-    const url = `https://${RAPIDAPI_HOST}/v3/fixtures?${params.toString()}`;
+    const {
+      league_id,
+      from = fmt(weekAgo),
+      to = fmt(weekAhead)
+    } = req.query;
+
+    const params = new URLSearchParams({ action: 'get_events', from, to });
+    if (league_id) params.set('league_id', league_id);
+
+    const url = `https://${RAPIDAPI_HOST}/?${params.toString()}`;
     const raw = await cachedFetch(url);
 
-    // On simplifie la réponse pour coller au format attendu par l'app
-    const games = (raw.response || []).map(item => ({
-      id: item.fixture.id,
-      status: item.fixture.status.short === 'FT' ? 'final'
-             : item.fixture.status.short === 'NS' ? 'scheduled'
-             : 'live',
-      date: item.fixture.date,
-      home: item.teams.home.name,
-      homeLogo: item.teams.home.logo, // fourni par l'API — vérifie les CGU avant affichage public
-      away: item.teams.away.name,
-      awayLogo: item.teams.away.logo,
-      hs: item.goals.home,
-      as: item.goals.away,
-      comp: item.league.name
-    }));
+    // La forme exacte des champs peut varier légèrement selon l'action —
+    // on couvre les variantes de noms les plus courantes pour cette API.
+    const list = Array.isArray(raw) ? raw : (raw.result || raw.events || []);
+    const games = list.map(item => {
+      const hs = item.match_hometeam_score ?? item.match_hometeam_score_ft ?? null;
+      const as = item.match_awayteam_score ?? item.match_awayteam_score_ft ?? null;
+      const statusRaw = (item.match_status || '').toString().trim();
+      const status = statusRaw === 'FT' ? 'final'
+                    : statusRaw === '' ? 'scheduled'
+                    : 'live';
+      return {
+        id: item.match_id,
+        status,
+        date: item.match_date,
+        time: item.match_time,
+        home: item.match_hometeam_name,
+        away: item.match_awayteam_name,
+        hs, as,
+        comp: item.league_name,
+        country: item.country_name
+      };
+    });
 
-    res.json({ games, cached: true, count: games.length });
+    res.json({ games, count: games.length });
   } catch (err) {
     console.error(err);
     res.status(500).json({
@@ -87,7 +106,7 @@ app.get('/api/fixtures', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('Backend Coup d\'Envoi actif. Essaie /api/fixtures?league=39&season=2026');
+  res.send('Backend Coup d\'Envoi actif. Essaie /api/fixtures (7 derniers jours à J+7 par défaut)');
 });
 
 app.listen(PORT, () => {
