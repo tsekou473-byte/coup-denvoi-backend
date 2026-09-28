@@ -63,6 +63,24 @@ app.get('/api/leagues', (req, res) => {
   res.json(Object.entries(LEAGUES).map(([code, l]) => ({ code, ...l })));
 });
 
+// Debug : renvoie le 1er match brut (toutes les clés) pour voir les champs disponibles (ex: logos)
+app.get('/api/raw', async (req, res) => {
+  try {
+    const today = new Date();
+    const weekAgo = new Date(today); weekAgo.setDate(today.getDate() - 7);
+    const fmt = d => d.toISOString().slice(0, 10);
+    const { comp = 'PL', from = fmt(weekAgo), to = fmt(today) } = req.query;
+    const leagueId = LEAGUES[comp.toUpperCase()]?.id;
+    const params = new URLSearchParams({ action: 'get_events', from, to });
+    if (leagueId) params.set('league_id', leagueId);
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?${params.toString()}`);
+    const list = Array.isArray(raw) ? raw : (raw.result || raw.events || []);
+    res.json(list[0] || { message: 'aucun match trouvé' });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 // GET /api/fixtures?comp=PL&from=2026-09-20&to=2026-09-27
 // comp: PL, LIGA, L1, BL, SA, LDC (voir /api/leagues) — sans comp, toutes ligues confondues.
 app.get('/api/fixtures', async (req, res) => {
@@ -111,6 +129,8 @@ app.get('/api/fixtures', async (req, res) => {
         time: item.match_time,
         home: item.match_hometeam_name,
         away: item.match_awayteam_name,
+        homeLogo: item.team_home_badge || item.match_hometeam_badge || null,
+        awayLogo: item.team_away_badge || item.match_awayteam_badge || null,
         hs, as,
         comp: item.league_name,
         country: item.country_name
