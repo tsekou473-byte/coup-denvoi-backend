@@ -30,27 +30,55 @@ const LEAGUES = {
   LDC:  { id: '3',   name: 'UEFA Champions League' }
 };
 
-// Cache mémoire simple : { url: { data, expiresAt } }
+// Cache mémoire : { url: { data, expiresAt } }
 const cache = new Map();
-const CACHE_TTL_MS = 60 * 1000;
+const inflight = new Map();        // demandes identiques en cours : une seule requête vers le fournisseur
+const CACHE_TTL_MS = 60 * 1000;    // durée de base : 60 s
+const CACHE_MAX = 400;             // nombre maximum d'entrées gardées en mémoire
 
 async function cachedFetch(url, ttl = CACHE_TTL_MS) {
   const now = Date.now();
   const hit = cache.get(url);
   if (hit && hit.expiresAt > now) return hit.data;
+  if (inflight.has(url)) return inflight.get(url);
 
-  const res = await fetch(url, {
-    headers: { 'X-RapidAPI-Key': RAPIDAPI_KEY, 'X-RapidAPI-Host': RAPIDAPI_HOST }
-  });
-  const bodyText = await res.text();
-  if (!res.ok) {
-    const err = new Error(`API-Football a répondu ${res.status}: ${bodyText.slice(0, 300)}`);
-    err.status = res.status;
-    throw err;
-  }
-  const data = JSON.parse(bodyText);
-  cache.set(url, { data, expiresAt: now + ttl });
-  return data;
+  const job = (async () => {
+    try {
+      const res = await fetch(url, {
+        headers: { 'X-RapidAPI-Key': RAPIDAPI_KEY, 'X-RapidAPI-Host': RAPIDAPI_HOST }
+      });
+      const bodyText = await res.text();
+      if (!res.ok) {
+        const err = new Error(`API-Football a répondu ${res.status}: ${bodyText.slice(0, 300)}`);
+        err.status = res.status;
+        throw err;
+      }
+      const data = JSON.parse(bodyText);
+      cache.set(url, { data, expiresAt: Date.now() + ttl });
+      if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+      return data;
+    } catch (err) {
+      // Fournisseur en panne ou quota dépassé : on sert la dernière copie connue plutôt qu'une erreur
+      if (hit) {
+        console.warn('Copie ancienne servie pour', url, '-', err.message);
+        return hit.data;
+      }
+      throw err;
+    } finally {
+      inflight.delete(url);
+    }
+  })();
+  inflight.set(url, job);
+  return job;
+}
+
+// Durée de mise en cache selon les dates demandées : moins d'appels = moins de quota consommé
+const DAY_MS = 24 * 60 * 60 * 1000;
+const dayIso = offset => new Date(Date.now() + offset * DAY_MS).toISOString().slice(0, 10);
+function fixturesTtl(from, to) {
+  if (to && to < dayIso(-1)) return 6 * 60 * 60 * 1000;   // jours passés : les scores ne bougent plus
+  if (from && from > dayIso(1)) return 15 * 60 * 1000;    // jours à venir : le programme change peu
+  return CACHE_TTL_MS;                                     // autour d'aujourd'hui : 60 s
 }
 
 const asList = raw => (Array.isArray(raw) ? raw : (raw.result || raw.events || []));
@@ -82,6 +110,8 @@ function mapGame(item, now) {
     time: item.match_time,
     home: item.match_hometeam_name,
     away: item.match_awayteam_name,
+    homeId: item.match_hometeam_id ? String(item.match_hometeam_id) : '',
+    awayId: item.match_awayteam_id ? String(item.match_awayteam_id) : '',
     homeLogo: item.team_home_badge || item.match_hometeam_badge || null,
     awayLogo: item.team_away_badge || item.match_awayteam_badge || null,
     hs: item.match_hometeam_score ?? null,
@@ -147,8 +177,11 @@ function mapDetail(item) {
   };
 }
 
+// Route très légère : sert à réveiller le serveur sans appeler le fournisseur
+app.get('/health', (req, res) => res.json({ ok: true, time: Date.now() }));
+
 app.get('/', (req, res) => {
-  res.send('Backend Coup d\'Envoi actif. Routes : /api/fixtures, /api/match, /api/competitions, /api/leagues');
+  res.send('Backend Coup d\'Envoi actif. Routes : /health, /api/fixtures, /api/match, /api/standings, /api/competitions, /api/leagues');
 });
 
 app.get('/api/leagues', (req, res) => {
@@ -172,7 +205,7 @@ app.get('/api/raw', async (req, res) => {
   }
 });
 
-// GET /api/fixtures?from=2026-09-28&to=2026-09-28&comp=PL
+// GET /api/fixtures?from=2026-09-28&to=2026-09-28&comp=PL   (option : &team_id=3103 pour les matchs d'une équipe)
 // Sans comp : toutes les compétitions. Sans dates : 7 jours avant à 7 jours après.
 app.get('/api/fixtures', async (req, res) => {
   try {
@@ -181,15 +214,19 @@ app.get('/api/fixtures', async (req, res) => {
     const weekAhead = new Date(today); weekAhead.setDate(today.getDate() + 7);
     const fmt = d => d.toISOString().slice(0, 10);
 
-    const { comp, league_id, from = fmt(weekAgo), to = fmt(weekAhead) } = req.query;
+    const { comp, league_id, team_id, from = fmt(weekAgo), to = fmt(weekAhead) } = req.query;
     const resolvedLeagueId = league_id || (comp && LEAGUES[comp.toUpperCase()]?.id);
 
     const params = new URLSearchParams({ action: 'get_events', from, to });
     if (resolvedLeagueId) params.set('league_id', resolvedLeagueId);
+    if (team_id) params.set('team_id', team_id);
 
-    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?${params.toString()}`);
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?${params.toString()}`, fixturesTtl(from, to));
     const now = new Date();
-    const games = asList(raw).map(item => mapGame(item, now));
+    let list = asList(raw);
+    // on filtre aussi ici, au cas où le fournisseur ignorerait team_id
+    if (team_id) list = list.filter(x => String(x.match_hometeam_id) === String(team_id) || String(x.match_awayteam_id) === String(team_id));
+    const games = list.map(item => mapGame(item, now));
     res.json({ games, count: games.length });
   } catch (err) {
     console.error(err);
@@ -218,6 +255,51 @@ app.get('/api/competitions', async (req, res) => {
   }
 });
 
+// Une ligne de classement, en tolérant quelques variantes de noms de champs
+function mapStanding(x) {
+  const n = v => (v === undefined || v === null || v === '' || isNaN(Number(v))) ? null : Number(v);
+  return {
+    pos: n(x.overall_league_position ?? x.position),
+    teamId: x.team_id ? String(x.team_id) : '',
+    team: x.team_name,
+    badge: x.team_badge || null,
+    played: n(x.overall_league_payed ?? x.overall_league_played ?? x.played),
+    w: n(x.overall_league_W),
+    d: n(x.overall_league_D),
+    l: n(x.overall_league_L),
+    gf: n(x.overall_league_GF),
+    ga: n(x.overall_league_GA),
+    pts: n(x.overall_league_PTS ?? x.points),
+    zone: x.overall_promotion || '',
+    stage: x.stage_name || ''
+  };
+}
+
+// GET /api/standings?league_id=152 → classement d'une compétition (mis en cache 10 min)
+app.get('/api/standings', async (req, res) => {
+  try {
+    const { league_id } = req.query;
+    if (!league_id) return res.status(400).json({ error: 'Paramètre league_id manquant.' });
+    let list = [];
+    try {
+      const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_standings&league_id=${encodeURIComponent(league_id)}`, 10 * 60 * 1000);
+      list = asList(raw);
+    } catch (err) {
+      if (err.status !== 404) throw err;   // 404 = pas de classement pour cette compétition
+    }
+    const rows = list.filter(x => x && x.team_name).map(mapStanding);
+    const out = { rows, count: rows.length };
+    if (!rows.length) {
+      out.note = 'Aucun classement renvoyé par le fournisseur pour cette compétition.';
+      out.sampleKeys = list[0] ? Object.keys(list[0]).slice(0, 30) : [];
+    }
+    res.json(out);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors de la récupération du classement.', detail: err.message || String(err) });
+  }
+});
+
 // GET /api/match?id=812694&date=2026-09-20  → détail d'un match
 app.get('/api/match', async (req, res) => {
   try {
@@ -226,7 +308,7 @@ app.get('/api/match', async (req, res) => {
     const day = date || new Date().toISOString().slice(0, 10);
 
     const params = new URLSearchParams({ action: 'get_events', from: day, to: day, match_id: id });
-    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?${params.toString()}`);
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?${params.toString()}`, fixturesTtl(day, day));
     const item = asList(raw).find(x => String(x.match_id) === String(id));
     if (!item) {
       return res.status(404).json({ error: 'Match introuvable.', detail: 'Aucun match avec cet identifiant à cette date.' });
