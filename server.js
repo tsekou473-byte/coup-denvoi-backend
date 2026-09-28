@@ -181,7 +181,7 @@ function mapDetail(item) {
 app.get('/health', (req, res) => res.json({ ok: true, time: Date.now() }));
 
 app.get('/', (req, res) => {
-  res.send('Backend Coup d\'Envoi actif. Routes : /health, /api/fixtures, /api/match, /api/standings, /api/competitions, /api/leagues');
+  res.send('Backend Coup d\'Envoi actif. Routes : /health, /api/fixtures, /api/team, /api/match, /api/standings, /api/competitions, /api/leagues');
 });
 
 app.get('/api/leagues', (req, res) => {
@@ -300,17 +300,43 @@ app.get('/api/standings', async (req, res) => {
   }
 });
 
-// Debug : renvoie le 1er joueur brut d'une équipe (toutes les clés) — pour voir ce que l'API donne
-app.get('/api/raw-teams', async (req, res) => {
+const POS_ORDER = { Goalkeepers: 0, Defenders: 1, Midfielders: 2, Forwards: 3 };
+function mapPlayer(x) {
+  const n = v => (v === undefined || v === null || v === '' || isNaN(Number(v))) ? null : Number(v);
+  return {
+    id: x.player_id ? String(x.player_id) : '',
+    name: x.player_name,
+    fullName: x.player_complete_name || x.player_name,
+    number: n(x.player_number),
+    age: n(x.player_age),
+    birthdate: x.player_birthdate || null,
+    country: x.player_country || null,
+    position: x.player_type || null,
+    photo: x.player_image || null,
+    captain: x.player_is_captain === '1' || x.player_is_captain === 1,
+    injured: /^y/i.test(x.player_injured || ''),
+    stats: {
+      apps: n(x.player_match_played), goals: n(x.player_goals), assists: n(x.player_assists),
+      yellow: n(x.player_yellow_cards), red: n(x.player_red_cards), rating: x.player_rating || null
+    }
+  };
+}
+
+// GET /api/team?league_id=152&team_id=3103 → effectif d'une équipe (mis en cache 6 h : un effectif change peu)
+app.get('/api/team', async (req, res) => {
   try {
-    const { league_id = '152' } = req.query;
-    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(league_id)}`, 60 * 60 * 1000);
-    const list = asList(raw);
-    const team = list[0] || {};
-    const player = (team.players && team.players[0]) || null;
-    res.json({ team_name: team.team_name, player_sample_keys: player ? Object.keys(player) : [], player_sample: player || 'aucun joueur trouvé' });
+    const { league_id, team_id } = req.query;
+    if (!league_id || !team_id) return res.status(400).json({ error: 'Paramètres league_id et team_id requis.' });
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(league_id)}`, 6 * 60 * 60 * 1000);
+    const team = asList(raw).find(t => String(t.team_id) === String(team_id));
+    if (!team) return res.status(404).json({ error: 'Équipe introuvable.', detail: "Aucune équipe avec cet identifiant dans cette compétition." });
+    const players = arr(team.players)
+      .map(mapPlayer)
+      .sort((a, b) => (POS_ORDER[a.position] ?? 9) - (POS_ORDER[b.position] ?? 9) || (a.number ?? 99) - (b.number ?? 99));
+    res.json({ id: String(team.team_id), name: team.team_name, badge: team.team_badge || null, country: team.team_country || null, players });
   } catch (err) {
-    res.status(500).json({ error: err.message || String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Erreur lors de la récupération de l'effectif.", detail: err.message || String(err) });
   }
 });
 
