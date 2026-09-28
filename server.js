@@ -300,6 +300,20 @@ app.get('/api/standings', async (req, res) => {
   }
 });
 
+// Debug : renvoie le 1er joueur brut d'une équipe (toutes les clés) — pour voir ce que l'API donne
+app.get('/api/raw-teams', async (req, res) => {
+  try {
+    const { league_id = '152' } = req.query;
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(league_id)}`, 60 * 60 * 1000);
+    const list = asList(raw);
+    const team = list[0] || {};
+    const player = (team.players && team.players[0]) || null;
+    res.json({ team_name: team.team_name, player_sample_keys: player ? Object.keys(player) : [], player_sample: player || 'aucun joueur trouvé' });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 // GET /api/match?id=812694&date=2026-09-20  → détail d'un match
 app.get('/api/match', async (req, res) => {
   try {
