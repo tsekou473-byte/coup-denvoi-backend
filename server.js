@@ -113,18 +113,32 @@ app.get('/api/fixtures', async (req, res) => {
       const hs = item.match_hometeam_score ?? null;
       const as = item.match_awayteam_score ?? null;
 
-      let status = 'scheduled';
-      if (item.match_date && item.match_time) {
-        const kickoff = new Date(`${item.match_date}T${item.match_time}:00Z`);
-        const twoHoursAfter = new Date(kickoff.getTime() + 2 * 60 * 60 * 1000);
-        if (now > twoHoursAfter) status = 'final';
-        else if (now > kickoff) status = 'live';
-        else status = 'scheduled';
+      // Statut réel fourni par l'API : "Finished", "" (pas commencé), ou la minute ("56") en direct
+      const st = (item.match_status || '').toString().trim();
+      const liveFlag = item.match_live === '1' || item.match_live === 1;
+      let status, minute = null;
+      if (/^(finished|after|ft|aet|pen)/i.test(st)) {
+        status = 'final';
+      } else if (/postponed|cancel|abandon|suspend/i.test(st)) {
+        status = 'postponed';
+      } else if (liveFlag || /^\d+/.test(st) || /half|^ht$|break/i.test(st)) {
+        status = 'live';
+        minute = st || null;
+      } else if (st === '') {
+        status = 'scheduled';
+      } else {
+        // statut inconnu : on retombe sur la comparaison avec l'heure du match
+        status = 'scheduled';
+        if (item.match_date && item.match_time) {
+          const kickoff = new Date(`${item.match_date}T${item.match_time}:00Z`);
+          if (now > new Date(kickoff.getTime() + 2 * 60 * 60 * 1000)) status = 'final';
+        }
       }
 
       return {
         id: item.match_id,
         status,
+        minute,
         date: item.match_date,
         time: item.match_time,
         home: item.match_hometeam_name,
@@ -133,7 +147,9 @@ app.get('/api/fixtures', async (req, res) => {
         awayLogo: item.team_away_badge || item.match_awayteam_badge || null,
         hs, as,
         comp: item.league_name,
-        country: item.country_name
+        leagueId: item.league_id,
+        country: item.country_name,
+        countryLogo: item.country_logo || null
       };
     });
 
