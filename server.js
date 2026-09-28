@@ -34,7 +34,7 @@ const LEAGUES = {
 const cache = new Map();
 const CACHE_TTL_MS = 60 * 1000;
 
-async function cachedFetch(url) {
+async function cachedFetch(url, ttl = CACHE_TTL_MS) {
   const now = Date.now();
   const hit = cache.get(url);
   if (hit && hit.expiresAt > now) return hit.data;
@@ -49,7 +49,7 @@ async function cachedFetch(url) {
     throw err;
   }
   const data = JSON.parse(bodyText);
-  cache.set(url, { data, expiresAt: now + CACHE_TTL_MS });
+  cache.set(url, { data, expiresAt: now + ttl });
   return data;
 }
 
@@ -148,7 +148,7 @@ function mapDetail(item) {
 }
 
 app.get('/', (req, res) => {
-  res.send('Backend Coup d\'Envoi actif. Routes : /api/fixtures, /api/match, /api/leagues');
+  res.send('Backend Coup d\'Envoi actif. Routes : /api/fixtures, /api/match, /api/competitions, /api/leagues');
 });
 
 app.get('/api/leagues', (req, res) => {
@@ -194,6 +194,27 @@ app.get('/api/fixtures', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erreur lors de la récupération des matchs.', detail: err.message || String(err) });
+  }
+});
+
+// GET /api/competitions → toutes les compétitions disponibles avec ton abonnement (liste mise en cache 6 h)
+app.get('/api/competitions', async (req, res) => {
+  try {
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_leagues`, 6 * 60 * 60 * 1000);
+    const competitions = asList(raw)
+      .filter(x => x && x.league_id)
+      .map(x => ({
+        id: String(x.league_id),
+        name: x.league_name,
+        country: x.country_name,
+        season: x.league_season || '',
+        logo: x.league_logo || null,
+        flag: x.country_logo || null
+      }));
+    res.json({ competitions, count: competitions.length });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors de la récupération des compétitions.', detail: err.message || String(err) });
   }
 });
 
