@@ -328,8 +328,8 @@ app.get('/api/raw-teamlist', async (req, res) => {
   try {
     const { league_id = '152' } = req.query;
     const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(league_id)}`, 60 * 1000);
-    const list = asList(raw).map(t => ({ id: t.team_id, name: t.team_name }));
-    res.json({ count: list.length, teams: list });
+    const first = asList(raw)[0] || {};
+    res.json({ count: asList(raw).length, first_team_keys: Object.keys(first), first_team: first });
   } catch (err) {
     res.status(500).json({ error: err.message || String(err) });
   }
