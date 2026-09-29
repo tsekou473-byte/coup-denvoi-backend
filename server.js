@@ -99,7 +99,7 @@ async function cachedFetch(url, ttl = CACHE_TTL_MS) {
 }
 
 // Fournisseur 2 : API-SPORTS (abonnement direct, authentification différente)
-async function cachedFetchDirect(url, ttl = CACHE_TTL_MS) {
+async function cachedFetchDirect(url, ttl = CACHE_TTL_MS, transform) {
   const now = Date.now();
   const hit = cache.get(url);
   if (hit && hit.expiresAt > now) return hit.data;
@@ -118,8 +118,9 @@ async function cachedFetchDirect(url, ttl = CACHE_TTL_MS) {
       const errs = data && data.errors;
       const msgs = Array.isArray(errs) ? errs : Object.values(errs || {});
       if (msgs.length) { const err = new Error(msgs.join(' | ').slice(0, 300)); err.status = 502; throw err; }
-      rememberAndTrim(url, data, ttl);
-      return data;
+      const out = transform ? transform(data) : data;
+      rememberAndTrim(url, out, typeof ttl === 'function' ? ttl(out) : ttl);
+      return out;
     } catch (err) {
       if (hit) { console.warn('Copie ancienne servie pour', url, '-', err.message); return hit.data; }
       throw err;
@@ -299,7 +300,7 @@ const AFR_POSITIONS = { Goalkeeper: 'Goalkeepers', Defender: 'Defenders', Midfie
 
 async function afrFetchDetail(fixtureId) {
   const base = `https://${APISPORTS_HOST}`;
-  const infoData = await cachedFetchDirect(`${base}/fixtures?id=${encodeURIComponent(fixtureId)}&timezone=${encodeURIComponent(TZ)}`, 60 * 1000);
+  const infoData = await cachedFetchDirect(`${base}/fixtures?id=${encodeURIComponent(fixtureId)}&timezone=${encodeURIComponent(TZ)}`, afrDetailTtl);
   const item = (infoData.response || [])[0];
   if (!item) return null;
 
@@ -387,6 +388,43 @@ async function afrFetchSquad(teamId) {
   }).sort((a, b) => (POS_ORDER[a.position] ?? 9) - (POS_ORDER[b.position] ?? 9) || (a.number ?? 99) - (b.number ?? 99));
   return { id: AFR_PREFIX + block.team.id, name: block.team.name, badge: block.team.logo || null, country: null, players };
 }
+
+// Le plan gratuit refuse « compétition + saison » pour les saisons récentes, mais accepte « un jour donné ».
+// On lit donc jour par jour ; la réponse d'un jour sert à la fois à la liste du jour et aux pages de compétition.
+// On ne garde en mémoire que les compétitions africaines : la réponse complète d'un jour est énorme.
+const afrOnly = d => ({ errors: d.errors, response: arr(d.response).filter(f => validFx(f) && AFR_BY_ID[String(f.league.id)]) });
+// Durée en mémoire d'un jour : court seulement s'il y a un match en cours ou sur le point de commencer, long sinon.
+// Ainsi les heures creuses ne coûtent presque rien sur les 100 requêtes du jour.
+const AFR_DONE = /^(NS|TBD|FT|AET|PEN|PST|CANC|ABD|AWD|WO)$/;
+function afrDayTtl(date) {
+  if (!(date >= dayIso(-1) && date <= dayIso(1))) return fixturesTtl(date, date);   // jours passés : 6 h ; jours à venir : 15 min
+  return out => {
+    const now = Date.now();
+    const busy = arr(out.response).some(f => {
+      const st = f.fixture && f.fixture.status && f.fixture.status.short;
+      if (st && !AFR_DONE.test(st)) return true;                                         // match en cours (mi-temps comprise)
+      const t = Date.parse(f.fixture && f.fixture.date);
+      return st === 'NS' && t && t > now - 10 * 60 * 1000 && t < now + 30 * 60 * 1000;   // coup d'envoi imminent
+    });
+    return busy ? 5 * 60 * 1000 : 20 * 60 * 1000;
+  };
+}
+// Fiche d'un match : terminé = ne change plus (6 h) ; sinon 1 minute
+const afrDetailTtl = out => {
+  const st = out && out.response && out.response[0] && out.response[0].fixture && out.response[0].fixture.status && out.response[0].fixture.status.short;
+  return /^(FT|AET|PEN)$/.test(st || '') ? 6 * 60 * 60 * 1000 : 60 * 1000;
+};
+const afrDay = date => cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures?date=${date}&timezone=${encodeURIComponent(TZ)}`, afrDayTtl(date), afrOnly);
+// Fenêtre limitée autour d'aujourd'hui : 7 jours = 7 requêtes au maximum, une seule fois (ensuite en mémoire)
+function afrWindow(from, to) {
+  const lo = from > dayIso(-3) ? from : dayIso(-3);
+  const hi = to < dayIso(3) ? to : dayIso(3);
+  const days = [];
+  for (let d = lo; d <= hi && days.length < 7; d = new Date(new Date(d + 'T00:00:00Z').getTime() + DAY_MS).toISOString().slice(0, 10)) days.push(d);
+  return days;
+}
+const AFR_STANDINGS_NOTE = "Le classement de cette compétition n'est pas disponible avec l'abonnement gratuit du fournisseur de données.";
+const afrStandingsBlocked = new Map();   // compétition -> moment où le blocage a été constaté (évite de gaspiller des appels)
 
 /* ============================= Routes ============================= */
 
@@ -476,11 +514,16 @@ app.get('/api/fixtures', async (req, res) => {
 
     if (resolvedLeagueId && isAfr(resolvedLeagueId)) {
       const leagueNum = stripAfr(resolvedLeagueId);
-      const season = await afrSeason(leagueNum, from);
-      const params = new URLSearchParams({ league: leagueNum, season: String(season), from, to, timezone: TZ });
-      const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures?${params.toString()}`, fixturesTtl(from, to));
-      const games = arr(data.response).filter(validFx).map(mapAfrFixture);
-      return res.json({ games, count: games.length });
+      const days = afrWindow(from, to);
+      const games = [];
+      let failed = 0, lastErr = null;
+      for (const day of days) {   // l'un après l'autre : le plan gratuit limite à 10 requêtes par minute
+        try { arr((await afrDay(day)).response).forEach(f => { if (validFx(f) && String(f.league.id) === leagueNum) games.push(mapAfrFixture(f)); }); }
+        catch (e) { failed++; lastErr = e; }
+      }
+      if (days.length && failed === days.length) throw lastErr;
+      games.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+      return res.json({ games, count: games.length, note: failed ? "Certains jours n'ont pas pu être chargés (limite du fournisseur). Réessaie dans une minute." : undefined });
     }
 
     const params = new URLSearchParams({ action: 'get_events', from, to });
@@ -496,9 +539,8 @@ app.get('/api/fixtures', async (req, res) => {
     // Un seul appel, filtré ici ; si ce fournisseur est indisponible, la liste principale n'est pas touchée.
     if (!resolvedLeagueId && !team_id && from === to && APISPORTS_KEY) {
       try {
-        const ttl = (from >= dayIso(-1) && from <= dayIso(1)) ? 4 * 60 * 1000 : fixturesTtl(from, to);   // ménage le quota gratuit (100 appels/jour)
-        const d2 = await cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures?date=${from}&timezone=${encodeURIComponent(TZ)}`, ttl);
-        games = games.concat(arr(d2.response).filter(f => validFx(f) && AFR_BY_ID[String(f.league?.id)]).map(mapAfrFixture));
+        const d2 = await afrDay(from);
+        games = games.concat(arr(d2.response).filter(f => validFx(f) && AFR_BY_ID[String(f.league.id)]).map(mapAfrFixture));
       } catch (e) { console.warn('Matchs africains indisponibles :', e.message); }
     }
     res.json({ games, count: games.length });
@@ -534,16 +576,21 @@ app.get('/api/standings', async (req, res) => {
 
     if (isAfr(league_id)) {
       const leagueNum = stripAfr(league_id);
-      const yr = season || await afrSeason(leagueNum);
-      let rows = [];
+      const since = afrStandingsBlocked.get(leagueNum);
+      if (since && Date.now() - since < 6 * 60 * 60 * 1000) return res.json({ rows: [], count: 0, note: AFR_STANDINGS_NOTE });
+      let rows = [], note;
       try {
+        const yr = season || await afrSeason(leagueNum);
         const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/standings?league=${leagueNum}&season=${yr}`, 10 * 60 * 1000);
         const groups = arr((arr(data.response)[0] || {}).league?.standings);
         rows = groups.flat().filter(r => r && r.team).map(r => mapAfrStanding(r, groups.length > 1));
+        if (!rows.length) note = 'Aucun classement renvoyé par le fournisseur pour cette compétition.';
       } catch (err) {
-        if (err.status !== 404) throw err;
+        if (/do not have access|plan/i.test(err.message || '')) { afrStandingsBlocked.set(leagueNum, Date.now()); note = AFR_STANDINGS_NOTE; }
+        else if (err.status === 404) note = 'Aucun classement renvoyé par le fournisseur pour cette compétition.';
+        else throw err;
       }
-      return res.json({ rows, count: rows.length, note: rows.length ? undefined : 'Aucun classement renvoyé par le fournisseur pour cette compétition.' });
+      return res.json({ rows, count: rows.length, note });
     }
 
     let list = [];
@@ -645,7 +692,7 @@ app.get('/api/afr-check', async (req, res) => {
     let list = arr((await cachedFetchDirect(`${base}/fixtures?${params.toString()}`, 60 * 1000)).response);
     let via = 'compétition + saison';
     if (!list.length) {
-      const d = await cachedFetchDirect(`${base}/fixtures?date=${dayIso(0)}&timezone=${encodeURIComponent(TZ)}`, 4 * 60 * 1000);
+      const d = await afrDay(dayIso(0));
       list = arr(d.response).filter(f => String(f.league?.id) === String(num));
       via = 'date du jour';
     }
