@@ -53,6 +53,7 @@ const AFRICA_LEAGUES = {
 const AFR_BY_ID = Object.fromEntries(Object.values(AFRICA_LEAGUES).map(l => [l.id, l]));
 const TZ = 'Europe/Paris';   // même fuseau que le fournisseur 1, pour que les heures soient cohérentes
 const AFR_PREFIX = 'afr:';
+let afrQuota = { remaining: null, limit: null, at: null };   // quota du jour restant, lu dans les en-têtes d'API-SPORTS
 const isAfr = v => typeof v === 'string' && v.startsWith(AFR_PREFIX);
 const stripAfr = v => v.slice(AFR_PREFIX.length);
 
@@ -108,6 +109,8 @@ async function cachedFetchDirect(url, ttl = CACHE_TTL_MS) {
     try {
       if (!APISPORTS_KEY) { const err = new Error('APISPORTS_KEY manquante sur le serveur.'); err.status = 400; throw err; }
       const res = await fetch(url, { headers: { 'x-apisports-key': APISPORTS_KEY } });
+      const rem = res.headers && res.headers.get && res.headers.get('x-ratelimit-requests-remaining');
+      if (rem != null) afrQuota = { remaining: Number(rem), limit: Number(res.headers.get('x-ratelimit-requests-limit')) || null, at: new Date().toISOString() };
       const bodyText = await res.text();
       if (!res.ok) { const err = new Error(`API-SPORTS a répondu ${res.status}: ${bodyText.slice(0, 300)}`); err.status = res.status; throw err; }
       const data = JSON.parse(bodyText);
@@ -271,8 +274,8 @@ function mapAfrFixture(item) {
     awayId: AFR_PREFIX + item.teams.away.id,
     homeLogo: item.teams.home.logo || null,
     awayLogo: item.teams.away.logo || null,
-    hs: item.goals.home,
-    as: item.goals.away,
+    hs: item.goals?.home ?? null,
+    as: item.goals?.away ?? null,
     comp: meta.name || item.league.name,
     leagueId: AFR_PREFIX + item.league.id,
     country: meta.country || 'Africa',
@@ -288,6 +291,8 @@ function mapAfrStanding(row, multiGroup) {
     zone: row.description || '', stage: multiGroup ? (row.group || '') : ''
   };
 }
+
+const validFx = f => !!(f && f.fixture && f.league && f.teams && f.teams.home && f.teams.away);
 
 // Les noms de poste d'API-SPORTS (singulier) sont convertis vers le vocabulaire déjà utilisé par l'app (pluriel)
 const AFR_POSITIONS = { Goalkeeper: 'Goalkeepers', Defender: 'Defenders', Midfielder: 'Midfielders', Attacker: 'Forwards' };
@@ -391,6 +396,51 @@ app.get('/', (req, res) => {
   res.send('Backend Coup d\'Envoi actif. Routes : /health, /api/fixtures, /api/team, /api/match, /api/standings, /api/competitions, /api/leagues (compétitions africaines : identifiants « afr:… »)');
 });
 
+// Diagnostic temporaire : montre ce que API-SPORTS renvoie vraiment pour un match africain et son classement (≈ 4 appels)
+async function rawDirect(path) {
+  const r = await fetch(`https://${APISPORTS_HOST}${path}`, { headers: { 'x-apisports-key': APISPORTS_KEY } });
+  const text = await r.text();
+  let json = null; try { json = JSON.parse(text); } catch (e) {}
+  return { http: r.status, remaining: r.headers.get('x-ratelimit-requests-remaining'), limit: r.headers.get('x-ratelimit-requests-limit'), json };
+}
+app.get('/api/afr-debug', async (req, res) => {
+  try {
+    if (!APISPORTS_KEY) return res.status(400).json({ error: 'APISPORTS_KEY manquante.' });
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const list = await rawDirect(`/fixtures?date=${date}&timezone=${encodeURIComponent(TZ)}`);
+    const afr = arr(list.json && list.json.response).filter(f => AFR_BY_ID[String(f.league && f.league.id)]);
+    const out = { date, http: list.http, quotaRestant: list.remaining, quotaTotal: list.limit, erreurs: list.json && list.json.errors, matchsAfricains: afr.length };
+    const pick = afr.find(f => f.fixture.status.short === 'FT') || afr[0];
+    if (pick) {
+      const one = await rawDirect(`/fixtures?id=${pick.fixture.id}&timezone=${encodeURIComponent(TZ)}`);
+      const it = arr(one.json && one.json.response)[0] || {};
+      const count = v => v === undefined ? 'absent' : arr(v).length;
+      out.match = {
+        id: pick.fixture.id, rencontre: `${pick.teams.home.name} - ${pick.teams.away.name}`, statut: pick.fixture.status.short,
+        competition: pick.league.name, competitionId: pick.league.id, erreurs: one.json && one.json.errors,
+        evenements: count(it.events), compositions: count(it.lineups), statistiques: count(it.statistics), cles: Object.keys(it)
+      };
+      const lg = await rawDirect(`/leagues?id=${pick.league.id}`);
+      const seasons = arr(arr(lg.json && lg.json.response)[0] && arr(lg.json.response)[0].seasons);
+      out.saisons = seasons.slice(-3).map(x => ({ annee: x.year, courante: !!x.current, couverture: {
+        classement: x.coverage && x.coverage.standings,
+        evenements: x.coverage && x.coverage.fixtures && x.coverage.fixtures.events,
+        compositions: x.coverage && x.coverage.fixtures && x.coverage.fixtures.lineups,
+        statistiques: x.coverage && x.coverage.fixtures && x.coverage.fixtures.statistics_fixtures } }));
+      const cur = seasons.find(x => x.current) || seasons[seasons.length - 1];
+      if (cur) {
+        const st = await rawDirect(`/standings?league=${pick.league.id}&season=${cur.year}`);
+        const groups = arr(arr(st.json && st.json.response)[0] && arr(st.json.response)[0].league && arr(st.json.response)[0].league.standings);
+        out.classement = { saisonUtilisee: cur.year, erreurs: st.json && st.json.errors, groupes: groups.length, lignes: groups.flat().length };
+      }
+      out.quotaRestantFin = lg.remaining;
+    }
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 app.get('/api/leagues', (req, res) => {
   res.json(Object.entries(LEAGUES).map(([code, l]) => ({ code, ...l })));
 });
@@ -429,7 +479,7 @@ app.get('/api/fixtures', async (req, res) => {
       const season = await afrSeason(leagueNum, from);
       const params = new URLSearchParams({ league: leagueNum, season: String(season), from, to, timezone: TZ });
       const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures?${params.toString()}`, fixturesTtl(from, to));
-      const games = arr(data.response).map(mapAfrFixture);
+      const games = arr(data.response).filter(validFx).map(mapAfrFixture);
       return res.json({ games, count: games.length });
     }
 
@@ -448,7 +498,7 @@ app.get('/api/fixtures', async (req, res) => {
       try {
         const ttl = (from >= dayIso(-1) && from <= dayIso(1)) ? 4 * 60 * 1000 : fixturesTtl(from, to);   // ménage le quota gratuit (100 appels/jour)
         const d2 = await cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures?date=${from}&timezone=${encodeURIComponent(TZ)}`, ttl);
-        games = games.concat(arr(d2.response).filter(f => AFR_BY_ID[String(f.league?.id)]).map(mapAfrFixture));
+        games = games.concat(arr(d2.response).filter(f => validFx(f) && AFR_BY_ID[String(f.league?.id)]).map(mapAfrFixture));
       } catch (e) { console.warn('Matchs africains indisponibles :', e.message); }
     }
     res.json({ games, count: games.length });
@@ -489,7 +539,7 @@ app.get('/api/standings', async (req, res) => {
       try {
         const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/standings?league=${leagueNum}&season=${yr}`, 10 * 60 * 1000);
         const groups = arr((arr(data.response)[0] || {}).league?.standings);
-        rows = groups.flat().map(r => mapAfrStanding(r, groups.length > 1));
+        rows = groups.flat().filter(r => r && r.team).map(r => mapAfrStanding(r, groups.length > 1));
       } catch (err) {
         if (err.status !== 404) throw err;
       }
@@ -558,6 +608,64 @@ app.get('/api/match', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Erreur lors de la récupération du match.', detail: err.message || String(err) });
   }
+});
+
+// Contrôle : que renvoie API-SPORTS pour une compétition africaine ? (≈ 5 appels du quota gratuit du jour)
+// Exemple : /api/afr-check?league_id=afr:29
+app.get('/api/afr-check', async (req, res) => {
+  const leagueParam = String(req.query.league_id || (AFR_PREFIX + '29'));
+  const num = isAfr(leagueParam) ? stripAfr(leagueParam) : leagueParam;
+  const base = `https://${APISPORTS_HOST}`;
+  const out = { league: AFR_PREFIX + num, steps: [] };
+  const step = async (name, fn) => {
+    try { out.steps.push({ name, ok: true, ...(await fn()) }); }
+    catch (e) { out.steps.push({ name, ok: false, error: String(e.message || e).slice(0, 300) }); }
+  };
+  const season = await afrSeason(num);
+  let fixtureId = null, teamNum = null;
+
+  await step('Compétition et saisons', async () => {
+    const item = arr((await cachedFetchDirect(`${base}/leagues?id=${encodeURIComponent(num)}`, 6 * 60 * 60 * 1000)).response)[0];
+    if (!item) return { note: 'Compétition inconnue chez le fournisseur' };
+    const seasons = arr(item.seasons).slice(-3).map(x => ({
+      year: x.year, current: !!x.current, standings: !!x.coverage?.standings,
+      events: !!x.coverage?.fixtures?.events, lineups: !!x.coverage?.fixtures?.lineups, statistics: !!x.coverage?.fixtures?.statistics_fixtures
+    }));
+    return { name_api: item.league?.name, type: item.league?.type, season_used: season, seasons };
+  });
+
+  await step('Classement', async () => {
+    const data = await cachedFetchDirect(`${base}/standings?league=${encodeURIComponent(num)}&season=${season}`, 10 * 60 * 1000);
+    const groups = arr((arr(data.response)[0] || {}).league?.standings);
+    return { groups: groups.length, rows: groups.flat().length };
+  });
+
+  await step('Matchs (hier à demain)', async () => {
+    const params = new URLSearchParams({ league: num, season: String(season), from: dayIso(-1), to: dayIso(1), timezone: TZ });
+    let list = arr((await cachedFetchDirect(`${base}/fixtures?${params.toString()}`, 60 * 1000)).response);
+    let via = 'compétition + saison';
+    if (!list.length) {
+      const d = await cachedFetchDirect(`${base}/fixtures?date=${dayIso(0)}&timezone=${encodeURIComponent(TZ)}`, 4 * 60 * 1000);
+      list = arr(d.response).filter(f => String(f.league?.id) === String(num));
+      via = 'date du jour';
+    }
+    if (list[0]) { fixtureId = list[0].fixture.id; teamNum = list[0].teams.home.id; }
+    return { via, count: list.length, first_fixture_id: fixtureId };
+  });
+
+  if (fixtureId) await step("Fiche d'un match", async () => {
+    const data = await cachedFetchDirect(`${base}/fixtures?id=${fixtureId}&timezone=${encodeURIComponent(TZ)}`, 60 * 1000);
+    const it = arr(data.response)[0] || {};
+    return { fixture_id: fixtureId, events: arr(it.events).length, lineups: arr(it.lineups).length, statistics: arr(it.statistics).length };
+  });
+
+  if (teamNum) await step('Effectif', async () => {
+    const block = arr((await cachedFetchDirect(`${base}/players/squads?team=${teamNum}`, 6 * 60 * 60 * 1000)).response)[0];
+    return { team: block?.team?.name || null, players: arr(block?.players).length };
+  });
+
+  out.quota = afrQuota;
+  res.json(out);
 });
 
 app.listen(PORT, () => {
