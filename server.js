@@ -16,6 +16,10 @@ const PORT = process.env.PORT || 3000;
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 const RAPIDAPI_HOST = 'apifootball3.p.rapidapi.com';
 
+// Deuxième fournisseur (API-SPORTS, abonnement direct) — utilisé pour les compétitions absentes du premier (ex. Afrique)
+const APISPORTS_HOST = 'v3.football.api-sports.io';
+const APISPORTS_KEY = process.env.APISPORTS_KEY;
+
 if (!RAPIDAPI_KEY) {
   console.warn('⚠️  RAPIDAPI_KEY manquante — ajoute-la dans les variables d\'environnement.');
 }
@@ -179,6 +183,42 @@ function mapDetail(item) {
 
 // Route très légère : sert à réveiller le serveur sans appeler le fournisseur
 app.get('/health', (req, res) => res.json({ ok: true, time: Date.now() }));
+
+// Appel au deuxième fournisseur (API-SPORTS, authentification différente : x-apisports-key)
+async function cachedFetchDirect(url, ttl = CACHE_TTL_MS) {
+  const now = Date.now();
+  const hit = cache.get(url);
+  if (hit && hit.expiresAt > now) return hit.data;
+  if (inflight.has(url)) return inflight.get(url);
+  const job = (async () => {
+    try {
+      const res = await fetch(url, { headers: { 'x-apisports-key': APISPORTS_KEY } });
+      const bodyText = await res.text();
+      if (!res.ok) { const err = new Error(`API-SPORTS a répondu ${res.status}: ${bodyText.slice(0, 300)}`); err.status = res.status; throw err; }
+      const data = JSON.parse(bodyText);
+      cache.set(url, { data, expiresAt: Date.now() + ttl });
+      return data;
+    } catch (err) {
+      if (hit) return hit.data;
+      throw err;
+    } finally { inflight.delete(url); }
+  })();
+  inflight.set(url, job);
+  return job;
+}
+
+// Debug temporaire : cherche des compétitions par mot-clé chez API-SPORTS (pour trouver les bons league_id une fois)
+app.get('/api/africa-search', async (req, res) => {
+  try {
+    if (!APISPORTS_KEY) return res.status(400).json({ error: 'APISPORTS_KEY manquante sur le serveur.' });
+    const { q = 'Africa' } = req.query;
+    const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/leagues?search=${encodeURIComponent(q)}`, 60 * 60 * 1000);
+    const list = (data.response || []).map(x => ({ id: x.league.id, name: x.league.name, type: x.league.type, country: x.country.name }));
+    res.json({ count: list.length, leagues: list });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
 
 app.get('/', (req, res) => {
   res.send('Backend Coup d\'Envoi actif. Routes : /health, /api/fixtures, /api/team, /api/match, /api/standings, /api/competitions, /api/leagues');
