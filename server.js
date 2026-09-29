@@ -323,29 +323,17 @@ function mapPlayer(x) {
 }
 
 // GET /api/team?league_id=152&team_id=3103 → effectif d'une équipe (mis en cache 6 h : un effectif change peu)
-// Debug temporaire : liste toutes les équipes (id + nom) d'une compétition
-app.get('/api/raw-teamlist', async (req, res) => {
-  try {
-    const { league_id = '152' } = req.query;
-    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(league_id)}`, 60 * 1000);
-    const first = asList(raw)[0] || {};
-    res.json({ count: asList(raw).length, first_team_keys: Object.keys(first), first_team: first });
-  } catch (err) {
-    res.status(500).json({ error: err.message || String(err) });
-  }
-});
-
 app.get('/api/team', async (req, res) => {
   try {
     const { league_id, team_id } = req.query;
     if (!league_id || !team_id) return res.status(400).json({ error: 'Paramètres league_id et team_id requis.' });
     const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(league_id)}`, 6 * 60 * 60 * 1000);
-    const team = asList(raw).find(t => String(t.team_id) === String(team_id));
+    const team = asList(raw).find(t => String(t.team_key) === String(team_id));
     if (!team) return res.status(404).json({ error: 'Équipe introuvable.', detail: "Aucune équipe avec cet identifiant dans cette compétition." });
     const players = arr(team.players)
       .map(mapPlayer)
       .sort((a, b) => (POS_ORDER[a.position] ?? 9) - (POS_ORDER[b.position] ?? 9) || (a.number ?? 99) - (b.number ?? 99));
-    res.json({ id: String(team.team_id), name: team.team_name, badge: team.team_badge || null, country: team.team_country || null, players });
+    res.json({ id: String(team.team_key), name: team.team_name, badge: team.team_badge || null, country: team.team_country || null, players });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Erreur lors de la récupération de l'effectif.", detail: err.message || String(err) });
