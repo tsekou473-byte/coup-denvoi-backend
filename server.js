@@ -323,6 +323,18 @@ function mapPlayer(x) {
 }
 
 // GET /api/team?league_id=152&team_id=3103 → effectif d'une équipe (mis en cache 6 h : un effectif change peu)
+// Debug temporaire : liste toutes les équipes (id + nom) d'une compétition
+app.get('/api/raw-teamlist', async (req, res) => {
+  try {
+    const { league_id = '152' } = req.query;
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(league_id)}`, 60 * 1000);
+    const list = asList(raw).map(t => ({ id: t.team_id, name: t.team_name }));
+    res.json({ count: list.length, teams: list });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 app.get('/api/team', async (req, res) => {
   try {
     const { league_id, team_id } = req.query;
