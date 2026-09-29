@@ -38,9 +38,11 @@ const LEAGUES = {
   LDC:  { id: '3',   name: 'UEFA Champions League' }
 };
 
-// Compétitions africaines (fournisseur 2) — league_id propres à API-SPORTS.
+// Compétitions du fournisseur 2 (API-SPORTS) : Afrique, Amériques, Asie. Identifiants vérifiés avec /api/afr-find.
 // Les noms restent en anglais ici : c'est l'app qui les traduit (réglage « Noms en français »).
-const AFRICA_LEAGUES = {
+// « country » sert seulement à ranger la compétition dans Explorer.
+const EXTRA_LEAGUES = {
+  // Afrique
   AFCON:   { id: '6',   name: 'Africa Cup of Nations',                 country: 'Africa' },
   CAFCL:   { id: '12',  name: 'CAF Champions League',                  country: 'Africa' },
   CAFCONF: { id: '20',  name: 'CAF Confederation Cup',                 country: 'Africa' },
@@ -48,9 +50,34 @@ const AFRICA_LEAGUES = {
   CHAN:    { id: '19',  name: 'African Nations Championship',          country: 'Africa' },
   AFCONQ:  { id: '36',  name: 'Africa Cup of Nations - Qualification', country: 'Africa' },
   WCQAF:   { id: '29',  name: 'World Cup - Qualification Africa',      country: 'Africa' },
-  PSL:     { id: '288', name: 'Premier Soccer League',                 country: 'South-Africa' }
+  PSL:     { id: '288', name: 'Premier Soccer League',                 country: 'South-Africa' },
+  // Sélections nationales des autres continents
+  COPAAM:  { id: '9',   name: 'Copa America',                          country: 'South America' },
+  ASIAN:   { id: '7',   name: 'Asian Cup',                             country: 'Asia' },
+  GOLD:    { id: '22',  name: 'CONCACAF Gold Cup',                     country: 'North America' },
+  CNL:     { id: '536', name: 'CONCACAF Nations League',               country: 'North America' },
+  WCQSA:   { id: '34',  name: 'World Cup - Qualification South America', country: 'South America' },
+  WCQCC:   { id: '31',  name: 'World Cup - Qualification CONCACAF',    country: 'North America' },
+  WCQAS:   { id: '30',  name: 'World Cup - Qualification Asia',        country: 'Asia' },
+  CWC:     { id: '15',  name: 'FIFA Club World Cup',                   country: 'World' },
+  // Clubs : compétitions continentales
+  LIBERT:  { id: '13',  name: 'CONMEBOL Libertadores',                 country: 'South America' },
+  SUDAM:   { id: '11',  name: 'CONMEBOL Sudamericana',                 country: 'South America' },
+  CCL:     { id: '16',  name: 'CONCACAF Champions League',             country: 'North America' },
+  LCUP:    { id: '772', name: 'Leagues Cup',                           country: 'North America' },
+  ACLE:    { id: '17',  name: 'AFC Champions League Elite',            country: 'Asia' },
+  ACL2:    { id: '18',  name: 'AFC Champions League Two',              country: 'Asia' },
+  // Clubs : championnats nationaux
+  MLS:     { id: '253', name: 'Major League Soccer',                   country: 'USA' },
+  USOC:    { id: '257', name: 'US Open Cup',                           country: 'USA' },
+  LIGAMX:  { id: '262', name: 'Liga MX',                               country: 'Mexico' },
+  BRA:     { id: '71',  name: 'Brasileirão Série A',                   country: 'Brazil' },
+  ARG:     { id: '128', name: 'Liga Profesional Argentina',            country: 'Argentina' },
+  ARGCUP:  { id: '130', name: 'Copa Argentina',                        country: 'Argentina' },
+  J1:      { id: '98',  name: 'J1 League',                             country: 'Japan' },
+  SPL:     { id: '307', name: 'Saudi Pro League',                      country: 'Saudi-Arabia' }
 };
-const AFR_BY_ID = Object.fromEntries(Object.values(AFRICA_LEAGUES).map(l => [l.id, l]));
+const AFR_BY_ID = Object.fromEntries(Object.values(EXTRA_LEAGUES).map(l => [l.id, l]));
 const TZ = 'Europe/Paris';   // même fuseau que le fournisseur 1, pour que les heures soient cohérentes
 const AFR_PREFIX = 'afr:';
 let afrQuota = { remaining: null, limit: null, at: null };   // quota du jour restant, lu dans les en-têtes d'API-SPORTS
@@ -406,7 +433,8 @@ function afrDayTtl(date) {
       const t = Date.parse(f.fixture && f.fixture.date);
       return st === 'NS' && t && t > now - 10 * 60 * 1000 && t < now + 30 * 60 * 1000;   // coup d'envoi imminent
     });
-    return busy ? 5 * 60 * 1000 : 20 * 60 * 1000;
+    const low = afrQuota.remaining != null && afrQuota.remaining < 30;   // il reste peu de requêtes aujourd'hui : on ralentit pour garder de quoi ouvrir des matchs
+    return (busy ? (low ? 15 : 5) : (low ? 45 : 20)) * 60 * 1000;
   };
 }
 // Fiche d'un match : terminé = ne change plus (6 h) ; sinon 1 minute
@@ -423,6 +451,10 @@ function afrWindow(from, to) {
   for (let d = lo; d <= hi && days.length < 7; d = new Date(new Date(d + 'T00:00:00Z').getTime() + DAY_MS).toISOString().slice(0, 10)) days.push(d);
   return days;
 }
+// Comparaison souple de noms (accents, « FC », majuscules...) pour ne pas afficher deux fois le même match ou la même compétition
+const nk = x => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\b(fc|cf|sc|ac|cd|ca|sd|club|de|da|do|the)\b/g, '').replace(/[^a-z0-9]/g, '');
+const sameKey = (a, b) => !!a && !!b && (a === b || (Math.min(a.length, b.length) >= 5 && (a.includes(b) || b.includes(a))));
+const sameComp = (c, l) => { const a = nk(c.name), b = nk(l.name); return a === b || (nk(c.country) === nk(l.country) && sameKey(a, b)); };
 const AFR_STANDINGS_NOTE = "Le classement de cette compétition n'est pas disponible avec l'abonnement gratuit du fournisseur de données.";
 const afrStandingsBlocked = new Map();   // compétition -> moment où le blocage a été constaté (évite de gaspiller des appels)
 
@@ -535,7 +567,7 @@ app.get('/api/fixtures', async (req, res) => {
     const fmt = d => d.toISOString().slice(0, 10);
     const { comp, league_id, team_id, from = fmt(weekAgo), to = fmt(weekAhead) } = req.query;
 
-    const africaCode = comp && AFRICA_LEAGUES[comp.toUpperCase()];
+    const africaCode = comp && EXTRA_LEAGUES[comp.toUpperCase()];
     const resolvedLeagueId = league_id || (comp && LEAGUES[comp.toUpperCase()]?.id) || (africaCode && AFR_PREFIX + africaCode.id);
 
     if (resolvedLeagueId && isAfr(resolvedLeagueId)) {
@@ -566,7 +598,14 @@ app.get('/api/fixtures', async (req, res) => {
     if (!resolvedLeagueId && !team_id && from === to && APISPORTS_KEY) {
       try {
         const d2 = await afrDay(from);
-        games = games.concat(arr(d2.response).filter(f => validFx(f) && AFR_BY_ID[String(f.league.id)]).map(mapAfrFixture));
+        const extra = arr(d2.response).filter(f => validFx(f) && AFR_BY_ID[String(f.league.id)]).map(mapAfrFixture);
+        // Déjà fournis par le premier fournisseur : pas de doublon. Même match = les deux équipes se ressemblent,
+        // ou même heure de coup d'envoi avec une équipe en commun (une équipe ne joue pas deux matchs à la fois).
+        const known = games.map(g => ({ h: nk(g.home), a: nk(g.away), t: g.time }));
+        games = games.concat(extra.filter(g => {
+          const H = nk(g.home), A = nk(g.away);
+          return !known.some(k => (sameKey(k.h, H) && sameKey(k.a, A)) || (k.t === g.time && (sameKey(k.h, H) || sameKey(k.a, A))));
+        }));
       } catch (e) { console.warn('Matchs africains indisponibles :', e.message); }
     }
     res.json({ games, count: games.length });
@@ -584,7 +623,7 @@ app.get('/api/competitions', async (req, res) => {
       .filter(x => x && x.league_id)
       .map(x => ({ id: String(x.league_id), name: x.league_name, country: x.country_name, season: x.league_season || '', logo: x.league_logo || null, flag: x.country_logo || null }));
 
-    const africa = Object.values(AFRICA_LEAGUES).map(l => ({ id: AFR_PREFIX + l.id, name: l.name, country: l.country, season: '', logo: `https://media.api-sports.io/football/leagues/${l.id}.png`, flag: null }));
+    const africa = Object.values(EXTRA_LEAGUES).filter(l => !competitions.some(c => sameComp(c, l))).map(l => ({ id: AFR_PREFIX + l.id, name: l.name, country: l.country, season: '', logo: `https://media.api-sports.io/football/leagues/${l.id}.png`, flag: null }));
 
     const all = [...competitions, ...africa];
     res.json({ competitions: all, count: all.length });
