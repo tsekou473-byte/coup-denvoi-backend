@@ -479,6 +479,32 @@ app.get('/api/afr-debug', async (req, res) => {
   }
 });
 
+// Recherche temporaire des identifiants de compétitions par pays (≈ 7 appels une seule fois, mémorisés 6 h)
+// Exemple : /api/afr-find   ou   /api/afr-find?countries=World,USA,Colombia
+app.get('/api/afr-find', async (req, res) => {
+  try {
+    if (!APISPORTS_KEY) return res.status(400).type('text/plain').send('APISPORTS_KEY manquante.');
+    const countries = String(req.query.countries || 'World,USA,Mexico,Brazil,Argentina,Japan,Saudi-Arabia').split(',').map(x => x.trim()).filter(Boolean).slice(0, 10);
+    const skip = /women|femin|féminin|\bu-?\d{2}\b|youth|reserve|amateur|regional|olympic|futsal|beach|friendl/i;
+    const worldKeep = /libertadores|sudamericana|recopa|copa america|asian cup|afc|gold cup|concacaf|leagues cup|club world|qualif|conmebol|nations league/i;
+    const lines = [];
+    for (const c of countries) {
+      try {
+        const q = c === 'World' ? '' : '&current=true';
+        const d = await cachedFetchDirect(`https://${APISPORTS_HOST}/leagues?country=${encodeURIComponent(c)}${q}`, 6 * 60 * 60 * 1000);
+        let list = arr(d.response).map(x => x.league).filter(l => l && l.name && !skip.test(l.name));
+        list = c === 'World' ? list.filter(l => worldKeep.test(l.name)) : list.slice(0, 14);
+        lines.push(`== ${c} (${list.length}) ==`);
+        list.forEach(l => lines.push(`${l.id} | ${l.name} | ${l.type}`));
+      } catch (e) { lines.push(`== ${c} : erreur ${String(e.message || e).slice(0, 120)} ==`); }
+    }
+    lines.push('', 'Quota restant : ' + (afrQuota.remaining != null ? afrQuota.remaining + ' / ' + afrQuota.limit : 'inconnu'));
+    res.type('text/plain').send(lines.join('\n'));
+  } catch (err) {
+    res.status(500).type('text/plain').send(err.message || String(err));
+  }
+});
+
 app.get('/api/leagues', (req, res) => {
   res.json(Object.entries(LEAGUES).map(([code, l]) => ({ code, ...l })));
 });
