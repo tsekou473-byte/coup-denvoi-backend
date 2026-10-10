@@ -171,6 +171,24 @@ const asList = raw => (Array.isArray(raw) ? raw : (raw.result || raw.events || [
 const arr = v => (Array.isArray(v) ? v : []);
 const numOrNull = v => (v === undefined || v === null || v === '' || isNaN(Number(v))) ? null : Number(v);
 
+
+/* Heure de Paris (date « AAAA-MM-JJ » + heure « HH:MM ») -> instant absolu en millisecondes (UTC).
+   L'application convertit ensuite dans le fuseau de l'appareil de la personne. */
+const PARIS_FMT = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+function parisOffsetMs(utcMs) {
+  const p = {};
+  PARIS_FMT.formatToParts(new Date(utcMs)).forEach(x => { p[x.type] = x.value; });
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(utcMs / 1000) * 1000;
+}
+function parisToUtcMs(date, time) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || ''), t = /^(\d{1,2}):(\d{2})/.exec(time || '');
+  if (!m || !t) return null;
+  const wall = Date.UTC(+m[1], +m[2] - 1, +m[3], +t[1], +t[2]);
+  let ms = wall - parisOffsetMs(wall);
+  ms = wall - parisOffsetMs(ms);            // 2e passage : fiable aussi autour du changement d'heure
+  return ms;
+}
+
 /* ============================= Fournisseur 1 ============================= */
 
 // Statut réel fourni par l'API : "Finished", "" (pas commencé), ou la minute ("56") en direct
@@ -182,8 +200,8 @@ function statusOf(item, now = new Date()) {
   if (liveFlag || /^\d+/.test(st) || /half|^ht$|break/i.test(st)) return { status: 'live', minute: st || null };
   if (st === '') return { status: 'scheduled', minute: null };
   if (item.match_date && item.match_time) {
-    const kickoff = new Date(`${item.match_date}T${item.match_time}:00Z`);
-    if (now > new Date(kickoff.getTime() + 2 * 60 * 60 * 1000)) return { status: 'final', minute: null };
+    const k = parisToUtcMs(item.match_date, item.match_time);
+    if (k !== null && now.getTime() > k + 2 * 60 * 60 * 1000) return { status: 'final', minute: null };
   }
   return { status: 'scheduled', minute: null };
 }
@@ -195,6 +213,7 @@ function mapGame(item, now) {
     status, minute,
     date: item.match_date,
     time: item.match_time,
+    ts: parisToUtcMs(item.match_date, item.match_time),
     home: item.match_hometeam_name,
     away: item.match_awayteam_name,
     homeId: item.match_hometeam_id ? String(item.match_hometeam_id) : '',
@@ -296,6 +315,7 @@ function mapAfrFixture(item) {
     status, minute,
     date: iso.slice(0, 10),
     time: iso.slice(11, 16),
+    ts: Number.isFinite(Date.parse(iso)) ? Date.parse(iso) : null,
     home: item.teams.home.name,
     away: item.teams.away.name,
     homeId: AFR_PREFIX + item.teams.home.id,
@@ -423,20 +443,24 @@ const afrOnly = d => ({ errors: d.errors, response: arr(d.response).filter(f => 
 // Durée en mémoire d'un jour : court seulement s'il y a un match en cours ou sur le point de commencer, long sinon.
 // Ainsi les heures creuses ne coûtent presque rien sur les 100 requêtes du jour.
 const AFR_DONE = /^(NS|TBD|FT|AET|PEN|PST|CANC|ABD|AWD|WO)$/;
+const afrBusy = list => {
+  const now = Date.now();
+  return arr(list).some(f => {
+    const st = f.fixture && f.fixture.status && f.fixture.status.short;
+    if (st && !AFR_DONE.test(st)) return true;                                         // match en cours (mi-temps comprise)
+    const t = Date.parse(f.fixture && f.fixture.date);
+    return st === 'NS' && t && t > now - 10 * 60 * 1000 && t < now + 30 * 60 * 1000;   // coup d'envoi imminent
+  });
+};
+const afrLife = busy => {
+  const low = afrQuota.remaining != null && afrQuota.remaining < 30;   // il reste peu de requêtes aujourd'hui : on ralentit pour garder de quoi ouvrir des matchs
+  return (busy ? (low ? 15 : 5) : (low ? 45 : 20)) * 60 * 1000;
+};
 function afrDayTtl(date) {
   if (!(date >= dayIso(-1) && date <= dayIso(1))) return fixturesTtl(date, date);   // jours passés : 6 h ; jours à venir : 15 min
-  return out => {
-    const now = Date.now();
-    const busy = arr(out.response).some(f => {
-      const st = f.fixture && f.fixture.status && f.fixture.status.short;
-      if (st && !AFR_DONE.test(st)) return true;                                         // match en cours (mi-temps comprise)
-      const t = Date.parse(f.fixture && f.fixture.date);
-      return st === 'NS' && t && t > now - 10 * 60 * 1000 && t < now + 30 * 60 * 1000;   // coup d'envoi imminent
-    });
-    const low = afrQuota.remaining != null && afrQuota.remaining < 30;   // il reste peu de requêtes aujourd'hui : on ralentit pour garder de quoi ouvrir des matchs
-    return (busy ? (low ? 15 : 5) : (low ? 45 : 20)) * 60 * 1000;
-  };
+  return out => afrLife(afrBusy(out.response));
 }
+const afrListTtl = out => afrLife(afrBusy(out.response));
 // Fiche d'un match : terminé = ne change plus (6 h) ; sinon 1 minute
 const afrDetailTtl = out => {
   const st = out && out.response && out.response[0] && out.response[0].fixture && out.response[0].fixture.status && out.response[0].fixture.status.short;
@@ -450,6 +474,40 @@ function afrWindow(from, to) {
   const days = [];
   for (let d = lo; d <= hi && days.length < 7; d = new Date(new Date(d + 'T00:00:00Z').getTime() + DAY_MS).toISOString().slice(0, 10)) days.push(d);
   return days;
+}
+// Matchs d'une compétition. Méthode 1 : « les 10 derniers » + « les 10 prochains » (2 requêtes, quelle que soit la semaine).
+// Si le plan gratuit la refuse, méthode 2 : lecture jour par jour autour d'aujourd'hui (le refus est mémorisé 6 h).
+let afrNextLastBlockedAt = 0;
+const AFR_PLAN_ERR = /do not have access|plan|subscription|not available/i;
+async function afrLeagueGames(leagueNum, from, to) {
+  if (Date.now() - afrNextLastBlockedAt > 6 * 60 * 60 * 1000) {
+    try {
+      const get = q => cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures?league=${encodeURIComponent(leagueNum)}&${q}&timezone=${encodeURIComponent(TZ)}`, afrListTtl);
+      const past = await get('last=10');   // l'une après l'autre : le plan gratuit limite à 10 requêtes par minute
+      const next = await get('next=10');
+      const seen = new Set(), games = [];
+      [...arr(past.response), ...arr(next.response)].forEach(f => { if (validFx(f) && !seen.has(f.fixture.id)) { seen.add(f.fixture.id); games.push(mapAfrFixture(f)); } });
+      games.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+      return { games, count: games.length, searched: null };
+    } catch (e) {
+      if (AFR_PLAN_ERR.test(e.message || '')) afrNextLastBlockedAt = Date.now();
+      console.warn('Méthode « derniers/prochains » indisponible, lecture jour par jour :', e.message);
+    }
+  }
+  const days = afrWindow(from, to);
+  const games = [];
+  let failed = 0, lastErr = null;
+  for (const day of days) {
+    try { arr((await afrDay(day)).response).forEach(f => { if (validFx(f) && String(f.league.id) === leagueNum) games.push(mapAfrFixture(f)); }); }
+    catch (e) { failed++; lastErr = e; }
+  }
+  if (days.length && failed === days.length) throw lastErr;
+  games.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+  return {
+    games, count: games.length,
+    searched: days.length ? { from: days[0], to: days[days.length - 1] } : null,
+    note: failed ? "Certains jours n'ont pas pu être chargés (limite du fournisseur). Réessaie dans une minute." : undefined
+  };
 }
 // Comparaison souple de noms (accents, « FC », majuscules...) pour ne pas afficher deux fois le même match ou la même compétition
 const nk = x => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\b(fc|cf|sc|ac|cd|ca|sd|club|de|da|do|the)\b/g, '').replace(/[^a-z0-9]/g, '');
@@ -571,17 +629,7 @@ app.get('/api/fixtures', async (req, res) => {
     const resolvedLeagueId = league_id || (comp && LEAGUES[comp.toUpperCase()]?.id) || (africaCode && AFR_PREFIX + africaCode.id);
 
     if (resolvedLeagueId && isAfr(resolvedLeagueId)) {
-      const leagueNum = stripAfr(resolvedLeagueId);
-      const days = afrWindow(from, to);
-      const games = [];
-      let failed = 0, lastErr = null;
-      for (const day of days) {   // l'un après l'autre : le plan gratuit limite à 10 requêtes par minute
-        try { arr((await afrDay(day)).response).forEach(f => { if (validFx(f) && String(f.league.id) === leagueNum) games.push(mapAfrFixture(f)); }); }
-        catch (e) { failed++; lastErr = e; }
-      }
-      if (days.length && failed === days.length) throw lastErr;
-      games.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
-      return res.json({ games, count: games.length, note: failed ? "Certains jours n'ont pas pu être chargés (limite du fournisseur). Réessaie dans une minute." : undefined });
+      return res.json(await afrLeagueGames(stripAfr(resolvedLeagueId), from, to));
     }
 
     const params = new URLSearchParams({ action: 'get_events', from, to });
