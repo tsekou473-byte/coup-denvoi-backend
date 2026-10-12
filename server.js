@@ -846,7 +846,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const fold = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const TEAM_STOP = new Set(['fc', 'afc', 'cf', 'sc', 'ac', 'as', 'city', 'united', 'town', 'club', 'real', 'sporting', 'athletic', 'de', 'la', 'le', 'the', 'of']);
 const teamTokens = s => fold(s).replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length >= 3 && !TEAM_STOP.has(w));
+// Abréviations courantes : le fournisseur de matchs écrit « PSG », TheSportsDB « Paris SG »
+const TEAM_ALIAS = [['psg', 'paris'], ['om', 'marseille'], ['ol', 'lyon'], ['barca', 'barcelona'], ['atletico', 'atletico'], ['inter', 'inter'], ['bayern', 'bayern'], ['spurs', 'tottenham'], ['wolves', 'wolverhampton'], ['man city', 'manchester'], ['man utd', 'manchester'], ['man united', 'manchester'], ['newcastle', 'newcastle'], ['real', 'real'], ['leverkusen', 'leverkusen'], ['dortmund', 'dortmund'], ['monchengladbach', 'monchengladbach']];
 function sameTeamName(a, b) {
+  const fa = fold(a).trim(), fb = fold(b).trim();
+  for (const [x, y] of TEAM_ALIAS) {
+    if ((fa === x || fa.startsWith(x + ' ')) && fb.includes(y)) return true;
+    if ((fb === x || fb.startsWith(x + ' ')) && fa.includes(y)) return true;
+  }
   const A = teamTokens(a), B = teamTokens(b);
   if (!A.length || !B.length) return fold(a).trim() === fold(b).trim();
   return A.some(x => B.some(y => x === y || (x.length >= 3 && y.startsWith(x)) || (y.length >= 3 && x.startsWith(y))));
@@ -894,7 +901,11 @@ async function findPhoto(team, name, fullName) {
   if (!hasFull && lastWord !== nm.surname) terms.push(lastWord);
   for (const term of terms) {
     const list = await tsdbSearch(term);
-    const ok = list.filter(p => /soccer|football/i.test(p.strSport || '') && (sameTeamName(p.strTeam, team) || sameTeamName(p.strTeam2, team)));
+    const wantFull = hasFull ? fold(fullName).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim() : '';
+    const isSoccer = p => /soccer|football/i.test(p.strSport || '');
+    // Même nom complet (deux mots ou plus) : on accepte même si l'écriture du club diffère (« PSG » / « Paris SG »)
+    const sameFull = p => wantFull.includes(' ') && fold(p.strPlayer).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim() === wantFull;
+    const ok = list.filter(p => isSoccer(p) && (sameTeamName(p.strTeam, team) || sameTeamName(p.strTeam2, team) || sameFull(p)));
     if (!ok.length) continue;
     const score = p => {
       const f = fold(p.strPlayer);
