@@ -901,6 +901,16 @@ async function findPhoto(team, name, fullName) {
   return null;
 }
 
+// Diagnostic temporaire : GET /api/photo-debug?p=Joe Willock -> ce que TheSportsDB répond à CE serveur
+app.get('/api/photo-debug', async (req, res) => {
+  try {
+    const term = String(req.query.p || 'Joe Willock');
+    const r = await fetch(`${TSDB_URL}?p=${encodeURIComponent(term.replace(/\s+/g, '_'))}`);
+    const body = await r.text();
+    res.json({ status: r.status, blockedUntil: tsdbBlockedUntil, cacheSize: photoCache.size, key: TSDB_KEY === '123' ? 'test' : 'perso', body: body.slice(0, 400) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /api/photos?team=Coventry&names=J. Rudoni|E. Mason-Clark   -> { photos: { "J. Rudoni": "https://…" }, pending: 3 }
 // Les photos déjà connues sont renvoyées tout de suite ; les autres sont cherchées (max 10 par appel) et « pending » dit combien restent.
 app.get('/api/photos', async (req, res) => {
