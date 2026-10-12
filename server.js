@@ -833,10 +833,15 @@ app.get('/api/afr-check', async (req, res) => {
 const TSDB_KEY = process.env.TSDB_KEY || '123';
 const TSDB_URL = `https://www.thesportsdb.com/api/v1/json/${encodeURIComponent(TSDB_KEY)}/searchplayers.php`;
 const PHOTO_TTL = 30 * 24 * 3600 * 1000;      // photo trouvée : 30 jours
-const PHOTO_MISS_TTL = 24 * 3600 * 1000;      // joueur introuvable : on réessaie après 1 jour
+const PHOTO_MISS_TTL = 6 * 3600 * 1000;       // joueur introuvable : on réessaie après 6 h (une réponse vide peut aussi venir d'une limite)
 const PHOTO_MAX = 4000;
 const photoCache = new Map();                  // « équipe|nom » -> { url, exp }
 let tsdbBlockedUntil = 0;                      // limite de demandes atteinte : on met en pause
+// La clé gratuite autorise environ 30 recherches par minute : on espace les recherches (une toutes les 2,3 s) au lieu de tout lancer d'un coup,
+// car une réponse « aucun résultat » peut en réalité venir de la limite.
+const TSDB_GAP_MS = Number(process.env.TSDB_GAP_MS) || 2300;
+let tsdbNextSlot = 0;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const fold = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const TEAM_STOP = new Set(['fc', 'afc', 'cf', 'sc', 'ac', 'as', 'city', 'united', 'town', 'club', 'real', 'sporting', 'athletic', 'de', 'la', 'le', 'the', 'of']);
@@ -857,6 +862,12 @@ function splitName(full) {
 
 async function tsdbSearch(term) {
   if (Date.now() < tsdbBlockedUntil) { const e = new Error('pause'); e.paused = true; throw e; }
+  const now0 = Date.now();
+  const wait = Math.max(0, tsdbNextSlot - now0);
+  if (wait > 45000) { const e = new Error('file trop longue'); e.paused = true; throw e; }
+  tsdbNextSlot = now0 + wait + TSDB_GAP_MS;     // on réserve notre créneau tout de suite
+  if (wait) await sleep(wait);
+  if (Date.now() < tsdbBlockedUntil) { const e = new Error('pause'); e.paused = true; throw e; }
   const res = await fetch(`${TSDB_URL}?p=${encodeURIComponent(term.replace(/\s+/g, '_'))}`);
   if (res.status === 429) { tsdbBlockedUntil = Date.now() + 65 * 1000; const e = new Error('limite'); e.paused = true; throw e; }
   if (!res.ok) throw new Error('TheSportsDB ' + res.status);
@@ -873,13 +884,14 @@ async function findPhoto(team, name, fullName) {
   if (!nm) return null;
   const sur = fold(nm.surname);
   const terms = [];
-  if (fullName && fullName !== name) terms.push(String(fullName).trim());
-  terms.push(nm.surname);
+  const hasFull = !!(fullName && fullName !== name);
+  if (hasFull) terms.push(String(fullName).trim());
+  if (!hasFull) terms.push(nm.surname);
   const folded = nm.surname.normalize('NFD').replace(/[̀-ͯ]/g, '');
-  if (folded !== nm.surname) terms.push(folded);
+  if (!hasFull && folded !== nm.surname) terms.push(folded);
   if (fullName && fullName !== name) { const f = String(fullName).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim(); if (f !== String(fullName).trim()) terms.splice(1, 0, f); }
   const lastWord = nm.surname.split(/\s+/).pop();
-  if (lastWord !== nm.surname) terms.push(lastWord);
+  if (!hasFull && lastWord !== nm.surname) terms.push(lastWord);
   for (const term of terms) {
     const list = await tsdbSearch(term);
     const ok = list.filter(p => /soccer|football/i.test(p.strSport || '') && (sameTeamName(p.strTeam, team) || sameTeamName(p.strTeam2, team)));
@@ -933,11 +945,11 @@ app.get('/api/photos', async (req, res) => {
       if (hit && hit.exp > now) { if (hit.url) photos[n] = hit.url; }
       else todo.push([n, key]);
     }
-    const batch = todo.slice(0, 10);
+    const batch = todo.slice(0, 6);
     const doneKeys = new Set();
     let paused = false;
-    for (let i = 0; i < batch.length && !paused; i += 3) {
-      await Promise.all(batch.slice(i, i + 3).map(async ([n, key]) => {
+    for (let i = 0; i < batch.length && !paused; i += 6) {
+      await Promise.all(batch.slice(i, i + 6).map(async ([n, key]) => {
         try {
           const url = await findPhoto(team, n, fullOf[n]);
           photoCache.set(key, { url, exp: Date.now() + (url ? PHOTO_TTL : PHOTO_MISS_TTL) });
