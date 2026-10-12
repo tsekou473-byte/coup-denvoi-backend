@@ -828,6 +828,108 @@ app.get('/api/afr-check', async (req, res) => {
   res.json(out);
 });
 
+/* ============================= Photos de joueurs (TheSportsDB) ============================= */
+// Clé gratuite de test par défaut (« 123 ») ; mets TSDB_KEY dans les variables Render si tu prends l'abonnement.
+const TSDB_KEY = process.env.TSDB_KEY || '123';
+const TSDB_URL = `https://www.thesportsdb.com/api/v1/json/${encodeURIComponent(TSDB_KEY)}/searchplayers.php`;
+const PHOTO_TTL = 30 * 24 * 3600 * 1000;      // photo trouvée : 30 jours
+const PHOTO_MISS_TTL = 3 * 24 * 3600 * 1000;  // joueur introuvable : on réessaie après 3 jours
+const PHOTO_MAX = 4000;
+const photoCache = new Map();                  // « équipe|nom » -> { url, exp }
+let tsdbBlockedUntil = 0;                      // limite de demandes atteinte : on met en pause
+
+const fold = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const TEAM_STOP = new Set(['fc', 'afc', 'cf', 'sc', 'ac', 'as', 'city', 'united', 'town', 'club', 'real', 'sporting', 'athletic', 'de', 'la', 'le', 'the', 'of']);
+const teamTokens = s => fold(s).replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length >= 3 && !TEAM_STOP.has(w));
+function sameTeamName(a, b) {
+  const A = teamTokens(a), B = teamTokens(b);
+  if (!A.length || !B.length) return fold(a).trim() === fold(b).trim();
+  return A.some(x => B.some(y => x === y || (x.length >= 3 && y.startsWith(x)) || (y.length >= 3 && x.startsWith(y))));
+}
+// « J. Rudoni » -> { initial: 'j', surname: 'Rudoni' } ; « Jack Rudoni » -> { initial: 'j', first: 'jack', surname: 'Rudoni' }
+function splitName(full) {
+  const w = String(full || '').trim().split(/\s+/).filter(Boolean);
+  if (!w.length) return null;
+  if (w.length === 1) return { initial: '', first: '', surname: w[0] };
+  const first = w[0].replace(/\.$/, '');
+  return { initial: fold(first).charAt(0), first: first.length > 1 ? fold(first) : '', surname: w.slice(1).join(' ') };
+}
+
+async function tsdbSearch(term) {
+  if (Date.now() < tsdbBlockedUntil) { const e = new Error('pause'); e.paused = true; throw e; }
+  const res = await fetch(`${TSDB_URL}?p=${encodeURIComponent(term.replace(/\s+/g, '_'))}`);
+  if (res.status === 429) { tsdbBlockedUntil = Date.now() + 65 * 1000; const e = new Error('limite'); e.paused = true; throw e; }
+  if (!res.ok) throw new Error('TheSportsDB ' + res.status);
+  const j = await res.json().catch(() => ({}));
+  return arr(j && j.player);
+}
+
+async function findPhoto(team, name) {
+  const nm = splitName(name);
+  if (!nm) return null;
+  const sur = fold(nm.surname);
+  const terms = [nm.surname];
+  const folded = nm.surname.normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (folded !== nm.surname) terms.push(folded);
+  const lastWord = nm.surname.split(/\s+/).pop();
+  if (lastWord !== nm.surname) terms.push(lastWord);
+  for (const term of terms) {
+    const list = await tsdbSearch(term);
+    const ok = list.filter(p => /soccer|football/i.test(p.strSport || '') && (sameTeamName(p.strTeam, team) || sameTeamName(p.strTeam2, team)));
+    if (!ok.length) continue;
+    const score = p => {
+      const f = fold(p.strPlayer);
+      let n = 0;
+      if (f.endsWith(sur) || f.includes(sur)) n += 2;
+      if (nm.first && f.startsWith(nm.first)) n += 3;
+      else if (nm.initial && f.charAt(0) === nm.initial) n += 1;
+      if (p.strCutout) n += 1;
+      return n;
+    };
+    ok.sort((a, b) => score(b) - score(a));
+    const best = ok[0];
+    const url = best.strCutout || best.strThumb || null;
+    if (url) return url;
+  }
+  return null;
+}
+
+// GET /api/photos?team=Coventry&names=J. Rudoni|E. Mason-Clark   -> { photos: { "J. Rudoni": "https://…" }, pending: 3 }
+// Les photos déjà connues sont renvoyées tout de suite ; les autres sont cherchées (max 10 par appel) et « pending » dit combien restent.
+app.get('/api/photos', async (req, res) => {
+  try {
+    const team = String(req.query.team || '').slice(0, 80);
+    const names = [...new Set(String(req.query.names || '').split('|').map(x => x.trim()).filter(Boolean))].slice(0, 40);
+    if (!team || !names.length) return res.json({ photos: {}, pending: 0 });
+    const now = Date.now();
+    const photos = {};
+    const todo = [];
+    for (const n of names) {
+      const key = fold(team) + '|' + fold(n);
+      const hit = photoCache.get(key);
+      if (hit && hit.exp > now) { if (hit.url) photos[n] = hit.url; }
+      else todo.push([n, key]);
+    }
+    const batch = todo.slice(0, 10);
+    let paused = false;
+    for (let i = 0; i < batch.length && !paused; i += 3) {
+      await Promise.all(batch.slice(i, i + 3).map(async ([n, key]) => {
+        try {
+          const url = await findPhoto(team, n);
+          photoCache.set(key, { url, exp: Date.now() + (url ? PHOTO_TTL : PHOTO_MISS_TTL) });
+          if (photoCache.size > PHOTO_MAX) photoCache.delete(photoCache.keys().next().value);
+          if (url) photos[n] = url;
+        } catch (e) { if (e.paused) paused = true; else console.warn('Photo', n, '-', e.message); }
+      }));
+    }
+    const left = todo.length - batch.length + batch.filter(([, key]) => !photoCache.has(key)).length;
+    res.json({ photos, pending: left, paused: paused || Date.now() < tsdbBlockedUntil });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`✅ Backend démarré sur le port ${PORT}`);
 });
