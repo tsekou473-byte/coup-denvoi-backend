@@ -833,7 +833,7 @@ app.get('/api/afr-check', async (req, res) => {
 const TSDB_KEY = process.env.TSDB_KEY || '123';
 const TSDB_URL = `https://www.thesportsdb.com/api/v1/json/${encodeURIComponent(TSDB_KEY)}/searchplayers.php`;
 const PHOTO_TTL = 30 * 24 * 3600 * 1000;      // photo trouvée : 30 jours
-const PHOTO_MISS_TTL = 3 * 24 * 3600 * 1000;  // joueur introuvable : on réessaie après 3 jours
+const PHOTO_MISS_TTL = 24 * 3600 * 1000;      // joueur introuvable : on réessaie après 1 jour
 const PHOTO_MAX = 4000;
 const photoCache = new Map();                  // « équipe|nom » -> { url, exp }
 let tsdbBlockedUntil = 0;                      // limite de demandes atteinte : on met en pause
@@ -860,17 +860,24 @@ async function tsdbSearch(term) {
   const res = await fetch(`${TSDB_URL}?p=${encodeURIComponent(term.replace(/\s+/g, '_'))}`);
   if (res.status === 429) { tsdbBlockedUntil = Date.now() + 65 * 1000; const e = new Error('limite'); e.paused = true; throw e; }
   if (!res.ok) throw new Error('TheSportsDB ' + res.status);
-  const j = await res.json().catch(() => ({}));
-  return arr(j && j.player);
+  const j = await res.json().catch(() => null);
+  // Une vraie réponse « aucun résultat » contient bien la clé "player" (valeur null). Sinon : limite atteinte, on met en pause.
+  if (!j || typeof j !== 'object' || !('player' in j)) { tsdbBlockedUntil = Date.now() + 65 * 1000; const e = new Error('limite'); e.paused = true; throw e; }
+  return arr(j.player);
 }
 
-async function findPhoto(team, name) {
-  const nm = splitName(name);
+// Le site ne renvoie que le meilleur résultat : avec un nom complet (« Joe Willock ») on tombe sur le bon joueur,
+// avec un nom de famille seul (« Willock ») on peut tomber sur un homonyme d'une autre équipe (qu'on écarte ensuite).
+async function findPhoto(team, name, fullName) {
+  const nm = splitName(fullName && fullName !== name ? fullName : name);
   if (!nm) return null;
   const sur = fold(nm.surname);
-  const terms = [nm.surname];
+  const terms = [];
+  if (fullName && fullName !== name) terms.push(String(fullName).trim());
+  terms.push(nm.surname);
   const folded = nm.surname.normalize('NFD').replace(/[̀-ͯ]/g, '');
   if (folded !== nm.surname) terms.push(folded);
+  if (fullName && fullName !== name) { const f = String(fullName).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim(); if (f !== String(fullName).trim()) terms.splice(1, 0, f); }
   const lastWord = nm.surname.split(/\s+/).pop();
   if (lastWord !== nm.surname) terms.push(lastWord);
   for (const term of terms) {
@@ -899,30 +906,38 @@ async function findPhoto(team, name) {
 app.get('/api/photos', async (req, res) => {
   try {
     const team = String(req.query.team || '').slice(0, 80);
-    const names = [...new Set(String(req.query.names || '').split('|').map(x => x.trim()).filter(Boolean))].slice(0, 40);
+    const pairs = [], seenN = new Set();
+    String(req.query.names || '').split('|').forEach(x => {
+      const [short, full] = x.split('~').map(t => (t || '').trim());
+      if (short && !seenN.has(short)) { seenN.add(short); pairs.push([short, full || '']); }
+    });
+    const names = pairs.map(p => p[0]).slice(0, 40);
+    const fullOf = Object.fromEntries(pairs);
     if (!team || !names.length) return res.json({ photos: {}, pending: 0 });
     const now = Date.now();
     const photos = {};
     const todo = [];
     for (const n of names) {
-      const key = fold(team) + '|' + fold(n);
+      const key = fold(team) + '|' + fold(n) + (fullOf[n] ? '|' + fold(fullOf[n]) : '');
       const hit = photoCache.get(key);
       if (hit && hit.exp > now) { if (hit.url) photos[n] = hit.url; }
       else todo.push([n, key]);
     }
     const batch = todo.slice(0, 10);
+    const doneKeys = new Set();
     let paused = false;
     for (let i = 0; i < batch.length && !paused; i += 3) {
       await Promise.all(batch.slice(i, i + 3).map(async ([n, key]) => {
         try {
-          const url = await findPhoto(team, n);
+          const url = await findPhoto(team, n, fullOf[n]);
           photoCache.set(key, { url, exp: Date.now() + (url ? PHOTO_TTL : PHOTO_MISS_TTL) });
+          doneKeys.add(key);
           if (photoCache.size > PHOTO_MAX) photoCache.delete(photoCache.keys().next().value);
           if (url) photos[n] = url;
         } catch (e) { if (e.paused) paused = true; else console.warn('Photo', n, '-', e.message); }
       }));
     }
-    const left = todo.length - batch.length + batch.filter(([, key]) => !photoCache.has(key)).length;
+    const left = todo.length - batch.length + batch.filter(([, key]) => !doneKeys.has(key)).length;
     res.json({ photos, pending: left, paused: paused || Date.now() < tsdbBlockedUntil });
   } catch (err) {
     res.status(500).json({ error: err.message || String(err) });
