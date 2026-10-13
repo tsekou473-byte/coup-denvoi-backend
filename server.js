@@ -752,6 +752,55 @@ app.get('/api/espn-debug', async (req, res) => {
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+/* Compositions / événements / statistiques de secours via ESPN pour les matchs du fournisseur 1 */
+const ESPN_EURO = ['uefa.champions', 'uefa.europa', 'uefa.europa.conf', 'eng.1', 'esp.1', 'ita.1', 'ger.1', 'fra.1', 'por.1', 'ned.1', 'bel.1', 'tur.1', 'sco.1', 'eng.2', 'eng.fa', 'eng.league_cup', 'esp.copa_del_rey', 'ger.dfb_pokal', 'ita.coppa_italia', 'fra.coupe_de_france', 'uefa.nations', 'uefa.euro', 'uefa.euroq', 'fifa.world', 'fifa.worldq.uefa', 'fifa.friendly'];
+const espnFound = new Map();   // id du match -> { at, key }
+async function espnFindKey(g) {
+  const hit = espnFound.get(g.id);
+  if (hit && Date.now() - hit.at < (hit.key ? 60 : 3) * 60 * 1000) return hit.key;
+  const H = nk(g.home), A = nk(g.away);
+  const day0 = new Date(g.ts).toISOString().slice(0, 10);
+  let key = null;
+  for (const day of [day0, addIsoDays(day0, -1)]) {
+    await Promise.all(ESPN_EURO.map(async slug => {
+      if (key) return;
+      try {
+        const data = await espnGet(`${ESPN_BASE}/${slug}/scoreboard?dates=${ymd(day)}&limit=300`, 5 * 60 * 1000);
+        for (const e of arr(data.events)) {
+          const cs = arr(arr(e.competitions)[0] && arr(e.competitions)[0].competitors);
+          const h = cs.find(c => c.homeAway === 'home'), a = cs.find(c => c.homeAway === 'away');
+          if (h && a && sameKey(nk(h.team.displayName), H) && sameKey(nk(a.team.displayName), A)) { key = slug + '~' + e.id; return; }
+        }
+      } catch (e) { /* compétition absente ce jour-là */ }
+    }));
+    if (key) break;
+  }
+  espnFound.set(g.id, { at: Date.now(), key });
+  return key;
+}
+async function enrichFromEspn(detail) {
+  try {
+    const noLu = !(detail.lineups.home.starters.length || detail.lineups.away.starters.length);
+    const noStats = !(detail.stats && detail.stats.length);
+    if (!(noLu || noStats) || typeof detail.ts !== 'number') return detail;
+    if (detail.status === 'scheduled' && detail.ts - Date.now() > 3 * 3600 * 1000) return detail;
+    const key = await espnFindKey(detail);
+    if (!key) return detail;
+    const x = await espnDetail(key);
+    if (!x) return detail;
+    if (noLu && (x.lineups.home.starters.length || x.lineups.away.starters.length)) {
+      detail.lineups = x.lineups; detail.homeSystem = detail.homeSystem || x.homeSystem; detail.awaySystem = detail.awaySystem || x.awaySystem;
+    }
+    if (noStats && x.stats.length) detail.stats = x.stats;
+    if (!detail.goals.length && x.goals.length && x.hs === detail.hs && x.as === detail.as) detail.goals = x.goals;
+    if (!detail.cards.length && x.cards.length) detail.cards = x.cards;
+    if (!detail.subs.length && x.subs.length) detail.subs = x.subs;
+    if (!detail.referee && x.referee) detail.referee = x.referee;
+    if (!detail.stadium && x.stadium) detail.stadium = x.stadium;
+  } catch (e) { console.warn('ESPN secours :', e.message); }
+  return detail;
+}
 const afrStandingsBlocked = new Map();   // compétition -> moment où le blocage a été constaté (évite de gaspiller des appels)
 
 /* ============================= Routes ============================= */
@@ -1001,7 +1050,7 @@ app.get('/api/match', async (req, res) => {
     const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?${params.toString()}`, fixturesTtl(day, day));
     const item = asList(raw).find(x => String(x.match_id) === String(id));
     if (!item) return res.status(404).json({ error: 'Match introuvable.', detail: 'Aucun match avec cet identifiant à cette date.' });
-    res.json(mapDetail(item));
+    res.json(await enrichFromEspn(mapDetail(item)));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erreur lors de la récupération du match.', detail: err.message || String(err) });
