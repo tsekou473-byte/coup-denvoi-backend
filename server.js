@@ -719,7 +719,7 @@ async function espnStandings(slug) {
       });
     });
   });
-  return rows;
+  return rows.sort((x, y) => String(x.stage).localeCompare(String(y.stage)) || (x.pos - y.pos));
 }
 
 async function espnSquad(slug, teamId) {
