@@ -1278,7 +1278,7 @@ async function tsdbJson(endpoint, query) {
   // file d'attente propre à l'histoire (les photos de joueurs ont la leur et peuvent être longues)
   if (Date.now() < histBlockedUntil) { const e = new Error('pause'); e.paused = true; throw e; }
   const now0 = Date.now(), wait = Math.max(0, histNextSlot - now0);
-  if (wait > 25000) { const e = new Error('file trop longue'); e.paused = true; throw e; }
+  if (wait > 40000) { const e = new Error('file trop longue'); e.paused = true; throw e; }
   histNextSlot = now0 + wait + 1200;
   if (wait) await sleep(wait);
   const res = await fetch(`https://www.thesportsdb.com/api/v1/json/${encodeURIComponent(TSDB_KEY)}/${endpoint}?${query}`);
@@ -1315,7 +1315,7 @@ app.get('/api/club', async (req, res) => {
     let t = null;
     for (const term of terms) {
       const j = await tsdbJson('searchteams.php', 't=' + encodeURIComponent(term.replace(/\s+/g, '_')));
-      if (!j || !('teams' in j)) { const e = new Error('limite'); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
+      if (!j || !('teams' in j)) { const e = new Error('limite ' + JSON.stringify(j).slice(0, 120)); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
       const nz = v => fold(v).replace(/[^a-z0-9]/g, '').replace(/^(fc|cf|afc|sc|ac|as)/, '').replace(/(fc|cf|afc|sc)$/, '');
       const wanted = new Set(terms.map(nz).concat([nz(name), nz(base)]));
       const names = x => [x.strTeam, x.strTeamShort, ...String(x.strTeamAlternate || '').split(',')].map(nz).filter(Boolean);
@@ -1333,7 +1333,7 @@ app.get('/api/club', async (req, res) => {
     histSet(key, club, club ? HIST_TTL : HIST_MISS_TTL);
     res.json({ club });
   } catch (err) {
-    if (err.paused) return res.json({ club: null, paused: true });
+    if (err.paused) return res.json({ club: null, paused: true, why: err.message });
     res.status(500).json({ error: err.message || String(err) });
   }
 });
