@@ -597,10 +597,22 @@ function mapEspnEvent(ev, slug) {
 
 // Matchs d'une compétition entre deux dates « Paris » (on demande un jour de marge de chaque côté, puis on filtre)
 async function espnLeagueGames(slug, from, to) {
-  const url = `${ESPN_BASE}/${slug}/scoreboard?dates=${ymd(addIsoDays(from, -1))}-${ymd(addIsoDays(to, 1))}&limit=400`;
-  const near = from <= dayIso(1) && to >= dayIso(-1);
-  const data = await espnGet(url, d => near ? (arr(d.events).some(e => e.status?.type?.state === 'in') ? 60 * 1000 : 5 * 60 * 1000) : (to < dayIso(-1) ? 6 * 60 * 60 * 1000 : 15 * 60 * 1000));
-  return arr(data.events).map(e => mapEspnEvent(e, slug)).filter(g => g && g.date >= from && g.date <= to);
+  const days = [];
+  for (let d = addIsoDays(from, -1); d <= addIsoDays(to, 1) && days.length < 45; d = addIsoDays(d, 1)) days.push(d);
+  const seen = new Set(), out = [];
+  await Promise.all(days.map(async day => {
+    const near = day >= dayIso(-1) && day <= dayIso(1);
+    try {
+      const data = await espnGet(`${ESPN_BASE}/${slug}/scoreboard?dates=${ymd(day)}&limit=300`,
+        d => near ? (arr(d.events).some(e => e.status?.type?.state === 'in') ? 60 * 1000 : 5 * 60 * 1000) : (day < dayIso(-1) ? 6 * 60 * 60 * 1000 : 15 * 60 * 1000));
+      arr(data.events).forEach(e => {
+        if (seen.has(e.id)) return; seen.add(e.id);
+        const g = mapEspnEvent(e, slug);
+        if (g && g.date >= from && g.date <= to) out.push(g);
+      });
+    } catch (e) { console.warn('ESPN', slug, day, e.message); }
+  }));
+  return out.sort((x, y) => (x.ts || 0) - (y.ts || 0));
 }
 // Tous les matchs d'un jour, toutes compétitions ESPN suivies
 async function espnDayGames(day) {
