@@ -862,7 +862,13 @@ app.get('/api/fixtures', async (req, res) => {
     const params = new URLSearchParams({ action: 'get_events', from, to });
     if (resolvedLeagueId) params.set('league_id', resolvedLeagueId);
     if (team_id) params.set('team_id', team_id);
-    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?${params.toString()}`, fixturesTtl(from, to));
+    let raw, p1err = null;
+    try { raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?${params.toString()}`, fixturesTtl(from, to)); }
+    catch (e) {
+      // Liste d'un jour : si le fournisseur 1 est indisponible (quota...), on garde au moins les matchs du fournisseur 2
+      if (resolvedLeagueId || team_id || from !== to) throw e;
+      p1err = e; raw = [];
+    }
     const now = new Date();
     let list = asList(raw);
     if (team_id) list = list.filter(x => String(x.match_hometeam_id) === String(team_id) || String(x.match_awayteam_id) === String(team_id));
@@ -882,7 +888,8 @@ app.get('/api/fixtures', async (req, res) => {
         }));
       } catch (e) { console.warn('Matchs africains indisponibles :', e.message); }
     }
-    res.json({ games, count: games.length });
+    if (p1err && !games.length) throw p1err;
+    res.json({ games, count: games.length, partial: p1err ? true : undefined });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erreur lors de la récupération des matchs.', detail: err.message || String(err) });
