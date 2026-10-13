@@ -515,6 +515,216 @@ const nk = x => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 const sameKey = (a, b) => !!a && !!b && (a === b || (Math.min(a.length, b.length) >= 5 && (a.includes(b) || b.includes(a))));
 const sameComp = (c, l) => { const a = nk(c.name), b = nk(l.name); return a === b || (nk(c.country) === nk(l.country) && sameKey(a, b)); };
 const AFR_STANDINGS_NOTE = "Le classement de cette compétition n'est pas disponible avec l'abonnement gratuit du fournisseur de données.";
+/* ============================= Fournisseur 2 : ESPN (gratuit, sans clé) =============================
+   Remplace API-SPORTS pour l'Afrique, les Amériques et l'Asie. Les identifiants d'app gardent le préfixe « afr: » :
+   - compétition : afr:<numéro historique>  (ex. afr:12)
+   - match       : afr:<slug ESPN>~<id du match>   (ex. afr:caf.champions~401906212)
+   - équipe      : afr:<id ESPN de l'équipe> */
+const ESPN_BASE = 'https://site.api.espn.com/apis/site/v2/sports/soccer';
+const ESPN_STAND = 'https://site.api.espn.com/apis/v2/sports/soccer';
+const ESPN_SLUGS = {
+  '6': 'caf.nations', '12': 'caf.champions', '20': 'caf.confed', '19': 'caf.championship', '36': 'caf.nations_qual', '29': 'fifa.worldq.caf', '288': 'rsa.1',
+  '9': 'conmebol.america', '7': 'afc.asian.cup', '22': 'concacaf.gold', '536': 'concacaf.nations.league',
+  '34': 'fifa.worldq.conmebol', '31': 'fifa.worldq.concacaf', '30': 'fifa.worldq.afc', '15': 'fifa.cwc',
+  '13': 'conmebol.libertadores', '11': 'conmebol.sudamericana', '16': 'concacaf.champions', '772': 'concacaf.leagues.cup',
+  '17': 'afc.champions', '18': 'afc.cup', '253': 'usa.1', '257': 'usa.open', '262': 'mex.1', '71': 'bra.1',
+  '128': 'arg.1', '130': 'arg.copa', '98': 'jpn.1', '307': 'ksa.1'
+};
+const ESPN_NUM_BY_SLUG = Object.fromEntries(Object.entries(ESPN_SLUGS).map(([n, s]) => [s, n]));
+
+async function espnGet(url, ttl) {
+  const now = Date.now();
+  const hit = cache.get(url);
+  if (hit && hit.expiresAt > now) return hit.data;
+  if (inflight.has(url)) return inflight.get(url);
+  const job = (async () => {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 CoupDEnvoi', 'Accept': 'application/json' } });
+      const txt = await res.text();
+      if (!res.ok) { const err = new Error(`ESPN a répondu ${res.status}`); err.status = res.status; throw err; }
+      const data = JSON.parse(txt);
+      rememberAndTrim(url, data, typeof ttl === 'function' ? ttl(data) : ttl);
+      return data;
+    } catch (err) {
+      if (hit) { console.warn('Copie ancienne servie pour', url, '-', err.message); return hit.data; }
+      throw err;
+    } finally { inflight.delete(url); }
+  })();
+  inflight.set(url, job);
+  return job;
+}
+
+const ymd = iso => iso.replace(/-/g, '');
+function addIsoDays(iso, n) { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function parisParts(ms) {
+  const p = {}; PARIS_FMT.formatToParts(new Date(ms)).forEach(x => { p[x.type] = x.value; });
+  return { date: `${p.year}-${p.month}-${p.day}`, time: `${p.hour === '24' ? '00' : p.hour}:${p.minute}` };
+}
+
+function espnStatus(st) {
+  const name = (st && st.type && st.type.name) || '', state = (st && st.type && st.type.state) || 'pre';
+  if (/POSTPONED|CANCEL|ABANDON|SUSPEND/.test(name)) return { status: 'postponed', minute: null };
+  if (state === 'post') return { status: 'final', minute: null };
+  if (state === 'in') {
+    if (/HALFTIME/.test(name)) return { status: 'live', minute: 'HT' };
+    const clock = String((st && st.displayClock) || '').replace(/'/g, '');
+    return { status: 'live', minute: clock || null };
+  }
+  return { status: 'scheduled', minute: null };
+}
+
+function mapEspnEvent(ev, slug) {
+  const comp = arr(ev.competitions)[0] || {};
+  const cs = arr(comp.competitors);
+  const home = cs.find(c => c.homeAway === 'home') || cs[0], away = cs.find(c => c.homeAway === 'away') || cs[1];
+  if (!home || !away || !home.team || !away.team) return null;
+  const { status, minute } = espnStatus(ev.status || comp.status);
+  const ms = Date.parse(ev.date);
+  const pp = Number.isFinite(ms) ? parisParts(ms) : { date: (ev.date || '').slice(0, 10), time: (ev.date || '').slice(11, 16) };
+  const num = ESPN_NUM_BY_SLUG[slug], meta = AFR_BY_ID[num] || {};
+  const sc = c => (status === 'scheduled' || status === 'postponed') ? null : numOrNull(c.score);
+  return {
+    id: AFR_PREFIX + slug + '~' + ev.id,
+    status, minute,
+    date: pp.date, time: pp.time, ts: Number.isFinite(ms) ? ms : null,
+    home: home.team.displayName || home.team.name, away: away.team.displayName || away.team.name,
+    homeId: AFR_PREFIX + home.team.id, awayId: AFR_PREFIX + away.team.id,
+    homeLogo: home.team.logo || null, awayLogo: away.team.logo || null,
+    hs: sc(home), as: sc(away),
+    comp: meta.name || slug, leagueId: AFR_PREFIX + (num || ''), country: meta.country || 'Africa', countryLogo: null
+  };
+}
+
+// Matchs d'une compétition entre deux dates « Paris » (on demande un jour de marge de chaque côté, puis on filtre)
+async function espnLeagueGames(slug, from, to) {
+  const url = `${ESPN_BASE}/${slug}/scoreboard?dates=${ymd(addIsoDays(from, -1))}-${ymd(addIsoDays(to, 1))}&limit=400`;
+  const near = from <= dayIso(1) && to >= dayIso(-1);
+  const data = await espnGet(url, d => near ? (arr(d.events).some(e => e.status?.type?.state === 'in') ? 60 * 1000 : 5 * 60 * 1000) : (to < dayIso(-1) ? 6 * 60 * 60 * 1000 : 15 * 60 * 1000));
+  return arr(data.events).map(e => mapEspnEvent(e, slug)).filter(g => g && g.date >= from && g.date <= to);
+}
+// Tous les matchs d'un jour, toutes compétitions ESPN suivies
+async function espnDayGames(day) {
+  const slugs = Object.values(ESPN_SLUGS);
+  const out = [];
+  await Promise.all(slugs.map(async s => {
+    try { out.push(...await espnLeagueGames(s, day, day)); } catch (e) { /* une compétition indisponible n'empêche pas les autres */ }
+  }));
+  return out;
+}
+
+const ESPN_POS = { G: 'Goalkeepers', D: 'Defenders', M: 'Midfielders', F: 'Forwards' };
+const cleanClock = v => String(v || '').replace(/'/g, '').replace(/\s+/g, '');
+
+async function espnDetail(key) {
+  const [slug, id] = String(key).split('~');
+  if (!slug || !id) return null;
+  const data = await espnGet(`${ESPN_BASE}/${slug}/summary?event=${encodeURIComponent(id)}`, d => {
+    const t = d && d.header && d.header.competitions && d.header.competitions[0] && d.header.competitions[0].status;
+    return (t && t.type && t.type.state === 'post') ? 60 * 60 * 1000 : 60 * 1000;
+  });
+  const hc = arr(data.header && data.header.competitions)[0];
+  if (!hc) return null;
+  const g = mapEspnEvent({ id, date: hc.date, status: hc.status, competitions: [hc] }, slug);
+  if (!g) return null;
+  const cs = arr(hc.competitors);
+  const homeC = cs.find(c => c.homeAway === 'home') || cs[0], awayC = cs.find(c => c.homeAway === 'away') || cs[1];
+  const homeId = String(homeC.team?.id ?? homeC.id);
+  const sideOf = e => String(e.team?.id) === homeId ? 'home' : 'away';
+
+  const evs = arr(data.keyEvents).length ? arr(data.keyEvents) : arr(hc.details);
+  const goals = [], cards = [], subs = [];
+  let h = 0, a = 0;
+  evs.forEach(e => {
+    const text = String((e.type && (e.type.text || e.type.type)) || '').toLowerCase();
+    const time = cleanClock(e.clock && e.clock.displayValue);
+    const names = arr(e.athletesInvolved).map(x => x.displayName || x.fullName).concat(arr(e.participants).map(x => x.athlete && x.athlete.displayName)).filter(Boolean);
+    const side = sideOf(e);
+    if (e.scoringPlay || /^goal|own goal|penalty - scored/.test(text)) {
+      if (/disallow|no goal|saved|missed/.test(text)) return;
+      if (side === 'home') h++; else a++;
+      goals.push({ time, team: side, player: names[0] || '', assist: '', score: `${h} - ${a}`, info: e.penaltyKick || /penalty/.test(text) ? 'Penalty' : (e.ownGoal || /own/.test(text) ? 'Own goal' : '') });
+    } else if (e.redCard || /red card/.test(text)) {
+      cards.push({ time, team: side, player: names[0] || '', card: 'red', info: 'Red Card' });
+    } else if (e.yellowCard || /yellow card/.test(text)) {
+      cards.push({ time, team: side, player: names[0] || '', card: 'yellow', info: 'Yellow Card' });
+    } else if (/substitution/.test(text)) {
+      const m = String(e.text || e.shortText || '').match(/\.\s*(.+?)\s+replaces\s+(.+?)(?:\s+because|\s*\(|\.|$)/i);
+      subs.push({ time, team: side, out: m ? m[2] : (names[1] || ''), in: m ? m[1] : (names[0] || '') });
+    }
+  });
+
+  const rosters = arr(data.rosters);
+  const lineupSide = c => {
+    const r = rosters.find(x => String(x.team?.id) === String(c.team?.id ?? c.id)) || rosters.find(x => x.homeAway === c.homeAway);
+    const list = arr(r && r.roster);
+    if (!list.length) return { starters: [], subs: [], coach: '' };
+    const mk = (p, pos) => ({ n: p.jersey != null ? String(p.jersey) : '', name: (p.athlete && (p.athlete.displayName || p.athlete.fullName)) || '', pos });
+    const starters = list.filter(p => p.starter).sort((x, y) => (x.formationPlace || 99) - (y.formationPlace || 99)).map((p, i) => mk(p, String(i + 1)));
+    const bench = list.filter(p => !p.starter).map(p => mk(p, '0'));
+    return { starters, subs: bench, coach: '' };
+  };
+
+  const teamsBox = arr(data.boxscore && data.boxscore.teams);
+  const statsOf = c => (teamsBox.find(t => String(t.team?.id) === String(c.team?.id ?? c.id)) || {}).statistics || [];
+  const hs = arr(statsOf(homeC)), as = arr(statsOf(awayC));
+  const labels = [...new Set([...hs, ...as].map(x => x.label || x.name))].filter(Boolean);
+  const stats = labels.map(type => ({
+    type,
+    home: (hs.find(x => (x.label || x.name) === type) || {}).displayValue ?? '0',
+    away: (as.find(x => (x.label || x.name) === type) || {}).displayValue ?? '0'
+  }));
+
+  const gi = data.gameInfo || {};
+  const ls = c => (arr(c.linescores)[0] || {}).displayValue ?? '';
+  return {
+    ...g,
+    htHome: ls(homeC), htAway: ls(awayC),
+    stadium: (gi.venue && gi.venue.fullName) || (hc.venue && hc.venue.fullName) || '',
+    referee: (arr(gi.officials)[0] || {}).displayName || (arr(gi.officials)[0] || {}).fullName || '',
+    round: (hc.leg && hc.leg.displayValue) || (arr(hc.notes)[0] || {}).headline || '',
+    homeSystem: (rosters.find(x => x.homeAway === 'home') || {}).formation || '',
+    awaySystem: (rosters.find(x => x.homeAway === 'away') || {}).formation || '',
+    goals, cards, subs,
+    lineups: { home: lineupSide(homeC), away: lineupSide(awayC) },
+    stats
+  };
+}
+
+async function espnStandings(slug) {
+  const data = await espnGet(`${ESPN_STAND}/${slug}/standings`, 10 * 60 * 1000);
+  const groups = arr(data.children).length ? arr(data.children) : [data];
+  const multi = groups.length > 1;
+  const rows = [];
+  groups.forEach(gr => {
+    arr(gr.standings && gr.standings.entries).forEach((en, i) => {
+      const st = {}; arr(en.stats).forEach(s => { st[s.name] = s.value; });
+      rows.push({
+        pos: numOrNull(st.rank) ?? i + 1, teamId: AFR_PREFIX + en.team.id, team: en.team.displayName || en.team.name,
+        badge: (arr(en.team.logos)[0] || {}).href || en.team.logo || null,
+        played: numOrNull(st.gamesPlayed), w: numOrNull(st.wins), d: numOrNull(st.ties), l: numOrNull(st.losses),
+        gf: numOrNull(st.pointsFor), ga: numOrNull(st.pointsAgainst), pts: numOrNull(st.points),
+        zone: (en.note && en.note.description) || '', stage: multi ? (gr.name || '') : ''
+      });
+    });
+  });
+  return rows;
+}
+
+async function espnSquad(slug, teamId) {
+  const id = String(teamId).replace(AFR_PREFIX, '');
+  const data = await espnGet(`${ESPN_BASE}/${slug}/teams/${encodeURIComponent(id)}/roster`, 6 * 60 * 60 * 1000);
+  const list = arr(data.athletes).flatMap(x => Array.isArray(x.items) ? x.items : [x]);
+  if (!data.team && !list.length) return null;
+  const players = list.map(p => ({
+    id: String(p.id), name: p.displayName || p.fullName, fullName: p.fullName || p.displayName, number: numOrNull(p.jersey), age: numOrNull(p.age),
+    birthdate: null, country: p.citizenship || null, position: ESPN_POS[(p.position && p.position.abbreviation) || ''] || null,
+    photo: (p.headshot && p.headshot.href) || null, captain: false, injured: false,
+    stats: { apps: null, goals: null, assists: null, yellow: null, red: null, rating: null }
+  })).sort((a, b) => (POS_ORDER[a.position] ?? 9) - (POS_ORDER[b.position] ?? 9) || (a.number ?? 99) - (b.number ?? 99));
+  const t = data.team || {};
+  return { id: AFR_PREFIX + id, name: t.displayName || t.name || '', badge: (arr(t.logos)[0] || {}).href || t.logo || null, country: null, players };
+}
+
 const afrStandingsBlocked = new Map();   // compétition -> moment où le blocage a été constaté (évite de gaspiller des appels)
 
 /* ============================= Routes ============================= */
@@ -630,7 +840,11 @@ app.get('/api/fixtures', async (req, res) => {
     const resolvedLeagueId = league_id || (comp && LEAGUES[comp.toUpperCase()]?.id) || (africaCode && AFR_PREFIX + africaCode.id);
 
     if (resolvedLeagueId && isAfr(resolvedLeagueId)) {
-      return res.json(await afrLeagueGames(stripAfr(resolvedLeagueId), from, to));
+      {
+        const slug = ESPN_SLUGS[stripAfr(resolvedLeagueId)];
+        const games = slug ? await espnLeagueGames(slug, from, to) : [];
+        return res.json({ games, count: games.length });
+      }
     }
 
     const params = new URLSearchParams({ action: 'get_events', from, to });
@@ -644,10 +858,9 @@ app.get('/api/fixtures', async (req, res) => {
 
     // Liste d'un seul jour, toutes compétitions : on y ajoute les matchs africains (fournisseur 2).
     // Un seul appel, filtré ici ; si ce fournisseur est indisponible, la liste principale n'est pas touchée.
-    if (!resolvedLeagueId && !team_id && from === to && APISPORTS_KEY) {
+    if (!resolvedLeagueId && !team_id && from === to) {
       try {
-        const d2 = await afrDay(from);
-        const extra = arr(d2.response).filter(f => validFx(f) && AFR_BY_ID[String(f.league.id)]).map(mapAfrFixture);
+        const extra = await espnDayGames(from);
         // Déjà fournis par le premier fournisseur : pas de doublon. Même match = les deux équipes se ressemblent,
         // ou même heure de coup d'envoi avec une équipe en commun (une équipe ne joue pas deux matchs à la fois).
         const known = games.map(g => ({ h: nk(g.home), a: nk(g.away), t: g.time }));
@@ -689,21 +902,10 @@ app.get('/api/standings', async (req, res) => {
     if (!league_id) return res.status(400).json({ error: 'Paramètre league_id manquant.' });
 
     if (isAfr(league_id)) {
-      const leagueNum = stripAfr(league_id);
-      const since = afrStandingsBlocked.get(leagueNum);
-      if (since && Date.now() - since < 6 * 60 * 60 * 1000) return res.json({ rows: [], count: 0, note: AFR_STANDINGS_NOTE });
+      const slug = ESPN_SLUGS[stripAfr(league_id)];
       let rows = [], note;
-      try {
-        const yr = season || await afrSeason(leagueNum);
-        const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/standings?league=${leagueNum}&season=${yr}`, 10 * 60 * 1000);
-        const groups = arr((arr(data.response)[0] || {}).league?.standings);
-        rows = groups.flat().filter(r => r && r.team).map(r => mapAfrStanding(r, groups.length > 1));
-        if (!rows.length) note = 'Aucun classement renvoyé par le fournisseur pour cette compétition.';
-      } catch (err) {
-        if (/do not have access|plan/i.test(err.message || '')) { afrStandingsBlocked.set(leagueNum, Date.now()); note = AFR_STANDINGS_NOTE; }
-        else if (err.status === 404) note = 'Aucun classement renvoyé par le fournisseur pour cette compétition.';
-        else throw err;
-      }
+      if (slug) { try { rows = await espnStandings(slug); } catch (err) { if (err.status !== 404) throw err; } }
+      if (!rows.length) note = 'Aucun classement renvoyé par le fournisseur pour cette compétition.';
       return res.json({ rows, count: rows.length, note });
     }
 
@@ -731,7 +933,8 @@ app.get('/api/team', async (req, res) => {
     if (!league_id || !team_id) return res.status(400).json({ error: 'Paramètres league_id et team_id requis.' });
 
     if (isAfr(league_id)) {
-      const team = await afrFetchSquad(team_id);
+      const sl = ESPN_SLUGS[stripAfr(league_id)];
+      const team = sl ? await espnSquad(sl, team_id) : null;
       if (!team) return res.status(404).json({ error: 'Équipe introuvable.', detail: "Aucune équipe avec cet identifiant." });
       return res.json(team);
     }
@@ -754,7 +957,7 @@ app.get('/api/match', async (req, res) => {
     if (!id) return res.status(400).json({ error: 'Paramètre id manquant.' });
 
     if (isAfr(id)) {
-      const detail = await afrFetchDetail(stripAfr(id));
+      const detail = await espnDetail(stripAfr(id));
       if (!detail) return res.status(404).json({ error: 'Match introuvable.', detail: 'Aucun match avec cet identifiant.' });
       return res.json(detail);
     }
@@ -1137,13 +1340,8 @@ app.get('/api/h2h', async (req, res) => {
     if (!a || !b) return res.status(400).json({ error: 'Paramètres a et b requis.' });
     const toNum = v => (v === '' || v == null || isNaN(+v)) ? null : +v;
     let out = { summary: null, matches: [] }, source = ''; const dbg = [];
-    if (isAfr(a) && isAfr(b)) {
-      const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures/headtohead?h2h=${stripAfr(a)}-${stripAfr(b)}`, 7 * 24 * 3600 * 1000);
-      const games = arr(data.response).filter(f => f && f.fixture && f.goals && f.goals.home != null && f.goals.away != null).map(f => ({
-        date: String(f.fixture.date || '').slice(0, 10), homeId: AFR_PREFIX + f.teams.home.id, awayId: AFR_PREFIX + f.teams.away.id,
-        home: f.teams.home.name, away: f.teams.away.name, hs: f.goals.home, as: f.goals.away, league: f.league && f.league.name || ''
-      }));
-      out = summarizeH2H(games, a); source = 'api-sports';
+    if (isAfr(a) || isAfr(b)) {
+      out = { summary: null, matches: [] }; source = 'none';   // pas de face-à-face pour les compétitions africaines / américaines / asiatiques
     } else if (!isAfr(a) && !isAfr(b)) {
       try {
         const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_H2H&firstTeamId=${encodeURIComponent(a)}&secondTeamId=${encodeURIComponent(b)}`, 24 * 3600 * 1000);
