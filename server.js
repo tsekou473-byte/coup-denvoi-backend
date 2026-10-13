@@ -1090,6 +1090,44 @@ app.get('/api/search', (req, res) => {
 });
 
 
+/* ---------- CONFRONTATIONS DIRECTES ---------- */
+// GET /api/h2h?a=<id équipe 1>&b=<id équipe 2>  (ids afr:… pour le fournisseur 2)
+app.get('/api/h2h', async (req, res) => {
+  try {
+    const { a, b } = req.query;
+    if (!a || !b) return res.status(400).json({ error: 'Paramètres a et b requis.' });
+    const toNum = v => (v === '' || v == null || isNaN(+v)) ? null : +v;
+    let games = [];
+    if (isAfr(a) && isAfr(b)) {
+      const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures/headtohead?h2h=${stripAfr(a)}-${stripAfr(b)}`, 24 * 3600 * 1000);
+      games = arr(data.response).filter(f => f && f.fixture && f.goals && f.goals.home != null && f.goals.away != null).map(f => ({
+        date: String(f.fixture.date || '').slice(0, 10), homeId: AFR_PREFIX + f.teams.home.id, awayId: AFR_PREFIX + f.teams.away.id,
+        home: f.teams.home.name, away: f.teams.away.name, hs: f.goals.home, as: f.goals.away, league: f.league && f.league.name || ''
+      }));
+    } else if (!isAfr(a) && !isAfr(b)) {
+      const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_H2H&firstTeamId=${encodeURIComponent(a)}&secondTeamId=${encodeURIComponent(b)}`, 24 * 3600 * 1000);
+      const list = arr(raw.firstTeam_VS_secondTeam || (raw.result && raw.result.firstTeam_VS_secondTeam));
+      games = list.map(x => ({
+        date: x.match_date, homeId: String(x.match_hometeam_id || ''), awayId: String(x.match_awayteam_id || ''),
+        home: x.match_hometeam_name, away: x.match_awayteam_name, hs: toNum(x.match_hometeam_score), as: toNum(x.match_awayteam_score), league: x.league_name || ''
+      })).filter(g => g.hs != null && g.as != null);
+    } else return res.json({ summary: null, matches: [] });
+    games.sort((x, y) => String(y.date).localeCompare(String(x.date)));
+    const s = { aWins: 0, draws: 0, bWins: 0, aGoals: 0, bGoals: 0, total: games.length };
+    for (const g of games) {
+      const aHome = String(g.homeId) === String(a);
+      const ag = aHome ? g.hs : g.as, bg = aHome ? g.as : g.hs;
+      s.aGoals += ag; s.bGoals += bg;
+      if (ag > bg) s.aWins++; else if (ag < bg) s.bWins++; else s.draws++;
+    }
+    res.json({ summary: s, matches: games.slice(0, 10) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur confrontations.', detail: err.message || String(err) });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`✅ Backend démarré sur le port ${PORT}`);
 });
