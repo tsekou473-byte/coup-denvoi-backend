@@ -1019,6 +1019,49 @@ app.get('/api/standings', async (req, res) => {
 });
 
 // GET /api/team?league_id=152&team_id=3103 (league_id peut être afr:12) → effectif d'une équipe
+
+/* Nationalité des joueurs du fournisseur 1 (souvent vide) : on la reprend de la fiche d'effectif ESPN du même club */
+const ESPN_CLUB_SLUGS = ['eng.1', 'esp.1', 'ita.1', 'ger.1', 'fra.1', 'por.1', 'ned.1', 'bel.1', 'tur.1', 'sco.1', 'eng.2', 'uefa.champions', 'uefa.europa', 'uefa.europa.conf'];
+async function espnClubIndex() {
+  const lists = await Promise.all(ESPN_CLUB_SLUGS.map(async slug => {
+    try {
+      const d = await espnGet(`${ESPN_BASE}/${slug}/teams`, 24 * 60 * 60 * 1000);
+      const teams = arr(arr(arr(d.sports)[0] && d.sports[0].leagues)[0] && d.sports[0].leagues[0].teams).map(x => x.team).filter(Boolean);
+      return teams.map(t => ({ slug, id: String(t.id), name: t.displayName || t.name || '' }));
+    } catch (e) { return []; }
+  }));
+  return lists.flat();
+}
+async function espnCountryMap(teamName) {
+  const idx = await espnClubIndex();
+  const e = idx.find(x => sameTeamName(x.name, teamName) && sameTeamName(teamName, x.name));
+  if (!e) return null;
+  const d = await espnGet(`${ESPN_BASE}/${e.slug}/teams/${encodeURIComponent(e.id)}/roster`, 6 * 60 * 60 * 1000);
+  const list = arr(d.athletes).flatMap(x => Array.isArray(x.items) ? x.items : [x]);
+  const full = new Map(), last = new Map();
+  list.forEach(p => {
+    const c = p.citizenship; if (!c) return;
+    full.set(nk(p.fullName || p.displayName), c);
+    const w = String(p.lastName || '').trim(); if (w) last.set(nk(w), last.has(nk(w)) ? null : c);
+  });
+  return { full, last };
+}
+async function fillCountries(players, teamName) {
+  if (!players.some(p => !p.country)) return;
+  try {
+    const m = await Promise.race([espnCountryMap(teamName), new Promise(r => setTimeout(() => r(null), 5000))]);
+    if (!m) return;
+    players.forEach(p => {
+      if (p.country) return;
+      const c = m.full.get(nk(p.fullName)) || m.full.get(nk(p.name));
+      if (c) { p.country = c; return; }
+      const parts = String(p.fullName || p.name || '').trim().split(/\s+/);
+      const l = m.last.get(nk(parts[parts.length - 1]));
+      if (l) p.country = l;
+    });
+  } catch (e) { console.warn('Nationalités ESPN:', e.message); }
+}
+
 app.get('/api/team', async (req, res) => {
   try {
     const { league_id, team_id } = req.query;
@@ -1035,6 +1078,7 @@ app.get('/api/team', async (req, res) => {
     const team = asList(raw).find(t => String(t.team_key) === String(team_id));
     if (!team) return res.status(404).json({ error: 'Équipe introuvable.', detail: "Aucune équipe avec cet identifiant dans cette compétition." });
     const players = arr(team.players).map(mapPlayer).sort((a, b) => (POS_ORDER[a.position] ?? 9) - (POS_ORDER[b.position] ?? 9) || (a.number ?? 99) - (b.number ?? 99));
+    await fillCountries(players, team.team_name);
     res.json({ id: String(team.team_key), name: team.team_name, badge: team.team_badge || null, country: team.team_country || null, players });
   } catch (err) {
     console.error(err);
