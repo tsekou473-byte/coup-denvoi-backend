@@ -968,6 +968,56 @@ app.get('/api/photos', async (req, res) => {
 });
 
 
+/* ---------- ACTUS (flux RSS) ---------- */
+const NEWS_SOURCES = [
+  { name: 'Foot Mercato', url: 'https://www.footmercato.net/flux-rss' }
+];
+const NEWS_TTL = 10 * 60 * 1000;
+let newsCache = { ts: 0, items: [] };
+const decodeEnt = s => String(s || '')
+  .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'")
+  .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&amp;/g, '&')
+  .replace(/<[^>]+>/g, '').trim();
+function parseRss(xml, source){
+  const out = [];
+  for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)){
+    const b = m[1];
+    const tag = t => { const r = b.match(new RegExp('<' + t + '[^>]*>([\\s\\S]*?)</' + t + '>')); return r ? decodeEnt(r[1]) : ''; };
+    const img = (b.match(/<enclosure[^>]+url="([^"]+)"/) || b.match(/<media:content[^>]+url="([^"]+)"/) || [])[1] || '';
+    const link = tag('link');
+    const ts = Date.parse(tag('pubDate')) || 0;
+    if (!tag('title') || !/^https?:\/\//.test(link)) continue;
+    out.push({ title: tag('title'), link, image: /^https?:\/\//.test(img) ? img : '', ts, source });
+  }
+  return out;
+}
+async function loadNews(){
+  if (Date.now() - newsCache.ts < NEWS_TTL && newsCache.items.length) return newsCache.items;
+  let items = [];
+  for (const s of NEWS_SOURCES){
+    try {
+      const r = await fetch(s.url, { headers: { 'User-Agent': 'Mozilla/5.0 CoupDEnvoi' } });
+      if (r.ok) items = items.concat(parseRss(await r.text(), s.name));
+    } catch (e) { console.log('news', s.name, e.message); }
+  }
+  items.sort((a, b) => b.ts - a.ts);
+  if (items.length){ newsCache = { ts: Date.now(), items }; return items; }
+  return newsCache.items; // en cas d'échec : dernière copie
+}
+const TRANSFER_RE = /transfert|mercato|recrue|recrut|signe|signature|prêt|prete|libre|offre|rumeur|piste|contrat|prolong|accord|officiel|quitte|départ|arriv|clause|indemnit/i;
+// GET /api/news?type=infos|transferts
+app.get('/api/news', async (req, res) => {
+  try {
+    let items = await loadNews();
+    if (req.query.type === 'transferts') items = items.filter(i => TRANSFER_RE.test(i.title));
+    res.json({ items: items.slice(0, 40) });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`✅ Backend démarré sur le port ${PORT}`);
 });
