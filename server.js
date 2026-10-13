@@ -770,7 +770,12 @@ async function espnFindKey(g) {
         for (const e of arr(data.events)) {
           const cs = arr(arr(e.competitions)[0] && arr(e.competitions)[0].competitors);
           const h = cs.find(c => c.homeAway === 'home'), a = cs.find(c => c.homeAway === 'away');
-          if (h && a && sameKey(nk(h.team.displayName), H) && sameKey(nk(a.team.displayName), A)) { key = slug + '~' + e.id; return; }
+          if (!h || !a) continue;
+          const hm = sameKey(nk(h.team.displayName), H), am = sameKey(nk(a.team.displayName), A);
+          const close = Math.abs(Date.parse(e.date) - g.ts) <= 15 * 60 * 1000;
+          const w = x => (String(x).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().match(/[a-z]{4,}/) || [''])[0];
+          const hw = !!w(g.home) && w(g.home) === w(h.team.displayName), aw = !!w(g.away) && w(g.away) === w(a.team.displayName);
+          if ((hm && am) || (close && (hm || am || hw || aw))) { key = slug + '~' + e.id; return; }
         }
       } catch (e) { /* compétition absente ce jour-là */ }
     }));
