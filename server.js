@@ -1092,42 +1092,78 @@ app.get('/api/search', (req, res) => {
 
 
 /* ---------- CONFRONTATIONS DIRECTES ---------- */
-// GET /api/h2h?a=<id équipe 1>&b=<id équipe 2>  (ids afr:… pour le fournisseur 2)
+// Le fournisseur 1 donne un historique court ; si on trouve peu de matchs, on complète avec API-SPORTS (historique long).
+const H2H_ALIAS = { 'psg': 'Paris Saint Germain', 'man city': 'Manchester City', 'man utd': 'Manchester United', 'manchester utd': 'Manchester United', 'atl. madrid': 'Atletico Madrid', 'inter': 'Inter', 'bayern munich': 'Bayern Munich', 'borussia dortmund': 'Borussia Dortmund' };
+const sportsIdCache = new Map();
+async function sportsTeamId(name) {
+  const key = nrm(name);
+  if (sportsIdCache.has(key)) return sportsIdCache.get(key);
+  const q = (H2H_ALIAS[key] || name).replace(/[^\p{L}\p{N} ]/gu, ' ').trim();
+  const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/teams?search=${encodeURIComponent(q)}`, 30 * 24 * 3600 * 1000);
+  const list = arr(data.response).map(x => x.team).filter(Boolean);
+  const exact = list.find(t => nrm(t.name) === nrm(q)) || list.find(t => !t.national && nrm(t.name).startsWith(nrm(q))) || list[0];
+  const id = exact ? String(exact.id) : null;
+  if (id) sportsIdCache.set(key, id);
+  return id;
+}
+function summarizeH2H(games, aId) {
+  games.sort((x, y) => String(y.date).localeCompare(String(x.date)));
+  const s = { aWins: 0, draws: 0, bWins: 0, aGoals: 0, bGoals: 0, total: games.length };
+  for (const g of games) {
+    const aHome = String(g.homeId) === String(aId);
+    const ag = aHome ? g.hs : g.as, bg = aHome ? g.as : g.hs;
+    s.aGoals += ag; s.bGoals += bg;
+    if (ag > bg) s.aWins++; else if (ag < bg) s.bWins++; else s.draws++;
+  }
+  return { summary: s, matches: games.slice(0, 10) };
+}
+async function sportsH2H(aName, bName) {
+  const [ia, ib] = await Promise.all([sportsTeamId(aName), sportsTeamId(bName)]);
+  if (!ia || !ib) return null;
+  const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures/headtohead?h2h=${ia}-${ib}`, 7 * 24 * 3600 * 1000);
+  const games = arr(data.response).filter(f => f && f.fixture && f.goals && f.goals.home != null && f.goals.away != null && /^(FT|AET|PEN)$/.test((f.fixture.status || {}).short || 'FT')).map(f => ({
+    date: String(f.fixture.date || '').slice(0, 10), homeId: String(f.teams.home.id), awayId: String(f.teams.away.id),
+    home: f.teams.home.name, away: f.teams.away.name, hs: f.goals.home, as: f.goals.away, league: f.league && f.league.name || ''
+  }));
+  return summarizeH2H(games, ia);
+}
+// GET /api/h2h?a=<id>&b=<id>&an=<nom>&bn=<nom>  (ids afr:… pour le fournisseur 2)
 app.get('/api/h2h', async (req, res) => {
   try {
-    const { a, b } = req.query;
+    const { a, b, an, bn } = req.query;
     if (!a || !b) return res.status(400).json({ error: 'Paramètres a et b requis.' });
     const toNum = v => (v === '' || v == null || isNaN(+v)) ? null : +v;
-    let games = [];
+    let out = { summary: null, matches: [] }, source = '';
     if (isAfr(a) && isAfr(b)) {
-      const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures/headtohead?h2h=${stripAfr(a)}-${stripAfr(b)}`, 24 * 3600 * 1000);
-      games = arr(data.response).filter(f => f && f.fixture && f.goals && f.goals.home != null && f.goals.away != null).map(f => ({
+      const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures/headtohead?h2h=${stripAfr(a)}-${stripAfr(b)}`, 7 * 24 * 3600 * 1000);
+      const games = arr(data.response).filter(f => f && f.fixture && f.goals && f.goals.home != null && f.goals.away != null).map(f => ({
         date: String(f.fixture.date || '').slice(0, 10), homeId: AFR_PREFIX + f.teams.home.id, awayId: AFR_PREFIX + f.teams.away.id,
         home: f.teams.home.name, away: f.teams.away.name, hs: f.goals.home, as: f.goals.away, league: f.league && f.league.name || ''
       }));
+      out = summarizeH2H(games, a); source = 'api-sports';
     } else if (!isAfr(a) && !isAfr(b)) {
-      const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_H2H&firstTeamId=${encodeURIComponent(a)}&secondTeamId=${encodeURIComponent(b)}`, 24 * 3600 * 1000);
-      const list = arr(raw.firstTeam_VS_secondTeam || (raw.result && raw.result.firstTeam_VS_secondTeam));
-      games = list.map(x => ({
-        date: x.match_date, homeId: String(x.match_hometeam_id || ''), awayId: String(x.match_awayteam_id || ''),
-        home: x.match_hometeam_name, away: x.match_awayteam_name, hs: toNum(x.match_hometeam_score), as: toNum(x.match_awayteam_score), league: x.league_name || ''
-      })).filter(g => g.hs != null && g.as != null);
-    } else return res.json({ summary: null, matches: [] });
-    games.sort((x, y) => String(y.date).localeCompare(String(x.date)));
-    const s = { aWins: 0, draws: 0, bWins: 0, aGoals: 0, bGoals: 0, total: games.length };
-    for (const g of games) {
-      const aHome = String(g.homeId) === String(a);
-      const ag = aHome ? g.hs : g.as, bg = aHome ? g.as : g.hs;
-      s.aGoals += ag; s.bGoals += bg;
-      if (ag > bg) s.aWins++; else if (ag < bg) s.bWins++; else s.draws++;
+      try {
+        const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_H2H&firstTeamId=${encodeURIComponent(a)}&secondTeamId=${encodeURIComponent(b)}`, 24 * 3600 * 1000);
+        const list = arr(raw.firstTeam_VS_secondTeam || (raw.result && raw.result.firstTeam_VS_secondTeam));
+        const games = list.map(x => ({
+          date: x.match_date, homeId: String(x.match_hometeam_id || ''), awayId: String(x.match_awayteam_id || ''),
+          home: x.match_hometeam_name, away: x.match_awayteam_name, hs: toNum(x.match_hometeam_score), as: toNum(x.match_awayteam_score), league: x.league_name || ''
+        })).filter(g => g.hs != null && g.as != null);
+        out = summarizeH2H(games, a); source = 'p1';
+      } catch (e) { console.log('h2h p1', e.message); }
+      if (out.matches.length < 6 && an && bn && APISPORTS_KEY) {
+        try {
+          const o2 = await sportsH2H(an, bn);
+          if (o2 && o2.summary.total > (out.summary ? out.summary.total : 0)) { out = o2; source = 'api-sports'; }
+        } catch (e) { console.log('h2h sports', e.message); }
+      }
     }
-    res.json({ summary: s, matches: games.slice(0, 10) });
+    res.json({ ...out, source });
   } catch (err) {
     console.error(err);
     res.status(req.query.debug ? 200 : 500).json({ error: 'Erreur confrontations.', detail: err.message || String(err) });
   }
 });
-
 
 app.listen(PORT, () => {
   console.log(`✅ Backend démarré sur le port ${PORT}`);
