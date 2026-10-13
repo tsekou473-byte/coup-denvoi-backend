@@ -1020,12 +1020,12 @@ app.get('/api/news', async (req, res) => {
 
 /* ---------- RECHERCHE (clubs + joueurs) ---------- */
 // Index construit en arrière-plan : une requête « équipes » par championnat important, espacées, gardées en mémoire.
-const IDX = { teams: [], players: [], leagues: 0, done: 0, building: false, builtAt: 0 };
+const IDX = { teams: [], players: [], leagues: 0, done: 0, building: false, builtAt: 0, blockedUntil: 0 };
 const IDX_COUNTRIES = /^(England|Spain|Italy|Germany|France|Portugal|Netherlands|Belgium|Turkey|Scotland|Brazil|Argentina|USA|Saudi|Eurocups|Europe|World)/i;
 const IDX_SKIP = /women|femin|u19|u21|u23|u20|youth|reserve|ii\b|cup|coupe|copa|pokal|supercup|super cup|trophy|play-?off|qualif|friendl|league two|national league/i;
 const IDX_MAX_LEAGUES = 45;
 const IDX_ALIAS = { 'psg': 'paris saint germain paris sg', 'man city': 'manchester city', 'man utd': 'manchester united', 'manchester utd': 'manchester united', 'atletico madrid': 'atletico de madrid', 'inter': 'internazionale inter milan', 'ac milan': 'milan' };
-const IDX_GAP_MS = 2000;
+const IDX_GAP_MS = 3000;
 const nrm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 async function buildIndex(){
   if (IDX.building) return;
@@ -1065,21 +1065,23 @@ async function buildIndex(){
           }
         }
         IDX.teams = teams; IDX.players = players;   // résultats disponibles au fur et à mesure
-      } catch (e) { console.log('index', lg.name, e.message); }
+      } catch (e) {
+        console.log('index', lg.name, e.message);
+        if (e.status === 429) { IDX.blockedUntil = Date.now() + 65 * 60 * 1000; break; }   // limite horaire atteinte : on arrête, on réessaiera plus tard
+      }
       IDX.done++;
       await new Promise(r => setTimeout(r, IDX_GAP_MS));
     }
-    IDX.builtAt = Date.now();
+    if (!IDX.blockedUntil || Date.now() > IDX.blockedUntil) IDX.builtAt = Date.now();
   } catch (e) { console.log('index erreur', e.message); }
   IDX.building = false;
 }
-setTimeout(buildIndex, 15000);
-setInterval(() => { if (Date.now() - IDX.builtAt > 12 * 3600 * 1000) buildIndex(); }, 30 * 60 * 1000);
+// L'index ne se construit plus au démarrage : seulement à la première recherche (économise le quota horaire du fournisseur).
 // GET /api/search?q=mbappe -> { teams:[…], players:[…], indexed, total, building }
 app.get('/api/search', (req, res) => {
   const q = nrm(req.query.q);
   if (q.length < 2) return res.json({ teams: [], players: [], indexed: IDX.done, total: IDX.leagues, building: IDX.building });
-  if (!IDX.teams.length && !IDX.building) buildIndex();
+  if (!IDX.building && (!IDX.builtAt || Date.now() - IDX.builtAt > 24 * 3600 * 1000) && !(IDX.blockedUntil && Date.now() < IDX.blockedUntil)) buildIndex();
   const words = q.split(/\s+/);
   const match = n => words.every(w => n.includes(w));
   const startsFirst = (a, b) => (b.n.startsWith(q) ? 1 : 0) - (a.n.startsWith(q) ? 1 : 0);
