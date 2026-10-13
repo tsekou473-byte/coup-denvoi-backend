@@ -1222,6 +1222,111 @@ async function findPhoto(team, name, fullName) {
   return null;
 }
 
+
+/* ============================= Histoire des clubs et carrière des joueurs (TheSportsDB) ============================= */
+const HIST_TTL = 14 * 24 * 3600 * 1000, HIST_MISS_TTL = 3 * 3600 * 1000;
+const histCache = new Map();   // clé -> { v, exp }
+const histGet = k => { const h = histCache.get(k); return h && h.exp > Date.now() ? h : null; };
+const histSet = (k, v, ttl) => { histCache.set(k, { v, exp: Date.now() + ttl }); if (histCache.size > 3000) histCache.delete(histCache.keys().next().value); };
+// même limiteur que les photos (la clé gratuite limite le nombre de demandes par minute)
+async function tsdbJson(endpoint, query) {
+  if (Date.now() < tsdbBlockedUntil) { const e = new Error('pause'); e.paused = true; throw e; }
+  const now0 = Date.now(), wait = Math.max(0, tsdbNextSlot - now0);
+  if (wait > 30000) { const e = new Error('file trop longue'); e.paused = true; throw e; }
+  tsdbNextSlot = now0 + wait + TSDB_GAP_MS;
+  if (wait) await sleep(wait);
+  const res = await fetch(`https://www.thesportsdb.com/api/v1/json/${encodeURIComponent(TSDB_KEY)}/${endpoint}?${query}`);
+  if (res.status === 429) { tsdbBlockedUntil = Date.now() + 65 * 1000; const e = new Error('limite'); e.paused = true; throw e; }
+  if (!res.ok) throw new Error('TheSportsDB ' + res.status);
+  return res.json().catch(() => null);
+}
+const LANG_FIELD = { fr: 'FR', en: 'EN', es: 'ES', pt: 'PT', de: 'DE', it: 'IT' };
+function pickText(o, lang, prefix) {
+  const order = [LANG_FIELD[lang], 'EN', 'FR', 'ES', 'PT', 'DE', 'IT'].filter(Boolean);
+  for (const l of order) { const t = o[prefix + l]; if (t && String(t).trim().length > 40) return String(t).trim(); }
+  return '';
+}
+function shortText(t, max) {
+  t = String(t || '').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max), i = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('.\n'));
+  return (i > max * 0.5 ? cut.slice(0, i + 1) : cut.replace(/\s+\S*$/, '') + '…');
+}
+
+// GET /api/club?name=Arsenal&lang=fr
+app.get('/api/club', async (req, res) => {
+  try {
+    const name = String(req.query.name || '').slice(0, 80).trim();
+    const lang = String(req.query.lang || 'fr').slice(0, 2);
+    if (!name) return res.json({ club: null });
+    const key = 'club|' + fold(name) + '|' + lang;
+    const hit = histGet(key);
+    if (hit) return res.json({ club: hit.v });
+    const j = await tsdbJson('searchteams.php', 't=' + encodeURIComponent(name.replace(/\s+/g, '_')));
+    if (!j || !('teams' in j)) { const e = new Error('limite'); e.paused = true; tsdbBlockedUntil = Date.now() + 65 * 1000; throw e; }
+    const t = arr(j.teams).filter(x => /soccer|football/i.test(x.strSport || '')).find(x => sameTeamName(x.strTeam, name) || sameTeamName(x.strTeamAlternate, name));
+    let club = null;
+    if (t) club = {
+      name: t.strTeam, formed: t.intFormedYear || null, stadium: t.strStadium || '', location: t.strLocation || '', country: t.strCountry || '',
+      league: t.strLeague || '', colours: [t.strColour1, t.strColour2].filter(Boolean), website: t.strWebsite || '',
+      keywords: t.strKeywords || '', badge: t.strBadge || null, fanart: t.strFanart1 || null,
+      text: shortText(pickText(t, lang, 'strDescription'), 1800)
+    };
+    histSet(key, club, club ? HIST_TTL : HIST_MISS_TTL);
+    res.json({ club });
+  } catch (err) {
+    if (err.paused) return res.json({ club: null, paused: true });
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+// GET /api/player-history?name=Senne%20Lammens&full=&team=Manchester%20United&lang=fr
+app.get('/api/player-history', async (req, res) => {
+  try {
+    const name = String(req.query.name || '').slice(0, 80).trim(), full = String(req.query.full || '').slice(0, 80).trim();
+    const team = String(req.query.team || '').slice(0, 80).trim(), lang = String(req.query.lang || 'fr').slice(0, 2);
+    if (!name) return res.json({ player: null });
+    const key = 'pl|' + fold(team) + '|' + fold(full || name) + '|' + lang;
+    const hit = histGet(key);
+    if (hit) return res.json({ player: hit.v });
+    const nm = splitName(full || name);
+    const hasFull = !!(full && full !== name);
+    const wantFull = fold(full || name).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+    const terms = [full || name];
+    if (nm && !hasFull && nm.surname !== name) terms.push(nm.surname);
+    let found = null;
+    for (const term of terms) {
+      const j = await tsdbJson('searchplayers.php', 'p=' + encodeURIComponent(term.replace(/\s+/g, '_')));
+      if (!j || !('player' in j)) { const e = new Error('limite'); e.paused = true; tsdbBlockedUntil = Date.now() + 65 * 1000; throw e; }
+      const list = arr(j.player).filter(p => /soccer|football/i.test(p.strSport || ''));
+      const sameFull = p => wantFull.includes(' ') && fold(p.strPlayer).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim() === wantFull;
+      const dup = list.filter(sameFull).length > 1;
+      const ok = list.filter(p => sameTeamName(p.strTeam, team) || sameTeamName(p.strTeam2, team) || (!dup && hasFull && sameFull(p)));
+      if (ok.length) { found = ok[0]; break; }
+    }
+    let player = null;
+    if (found) {
+      let career = [];
+      try {
+        const f = await tsdbJson('lookupformerteams.php', 'id=' + encodeURIComponent(found.idPlayer));
+        career = arr(f && f.formerteams).map(x => ({ team: x.strFormerTeam, type: x.strMoveType || '', from: x.strJoined || '', to: x.strDeparted || '' }))
+          .filter(x => x.team);
+      } catch (e) { if (e.paused) throw e; }
+      player = {
+        name: found.strPlayer, born: found.dateBorn || '', birthplace: found.strBirthLocation || '', nationality: found.strNationality || '',
+        height: found.strHeight || '', position: found.strPosition || '', number: found.strNumber || '', signed: found.dateSigned || '',
+        team: found.strTeam || '', career,
+        text: shortText(pickText(found, lang, 'strDescription'), 1500)
+      };
+    }
+    histSet(key, player, player ? HIST_TTL : HIST_MISS_TTL);
+    res.json({ player });
+  } catch (err) {
+    if (err.paused) return res.json({ player: null, paused: true });
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 // GET /api/photos?team=Coventry&names=J. Rudoni|E. Mason-Clark   -> { photos: { "J. Rudoni": "https://…" }, pending: 3 }
 // Les photos déjà connues sont renvoyées tout de suite ; les autres sont cherchées (max 10 par appel) et « pending » dit combien restent.
 app.get('/api/photos', async (req, res) => {
