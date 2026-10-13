@@ -13,6 +13,7 @@ const fetch = require('node-fetch');
 
 const app = express();
 app.use(cors()); // autorise l'app hébergée ailleurs à appeler ce backend
+app.use(express.json({ limit: '50kb' }));
 
 const PORT = process.env.PORT || 3000;
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
@@ -1261,6 +1262,120 @@ app.get('/api/winprob', async (req, res) => {
     }
   } catch (e) { errs.push('model: ' + e.message); }
   res.json(req.query.debug ? { source: null, errs } : { source: null });
+});
+
+/* ---------- NOTIFICATIONS PUSH (buts, coup d'envoi, fin de match des favoris) ---------- */
+// Variables à définir sur Render : VAPID_PUBLIC_KEY et VAPID_PRIVATE_KEY (sans elles, les notifications sont désactivées).
+let webpush = null;
+try { webpush = require('web-push'); } catch (e) { console.warn('web-push non installé : notifications désactivées.'); }
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY, VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY;
+const PUSH_ON = !!(webpush && VAPID_PUBLIC && VAPID_PRIVATE);
+if (PUSH_ON) webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'https://tsekou473-byte.github.io/coup-denvoi-app/', VAPID_PUBLIC, VAPID_PRIVATE);
+else console.warn('Notifications push désactivées (clés VAPID manquantes).');
+
+const fs = require('fs'), os = require('os'), path = require('path');
+const SUBS_FILE = path.join(os.tmpdir(), 'coup-denvoi-push-subs.json');
+const subs = new Map();   // endpoint -> { sub, teams:[], matches:[], lang }
+try { for (const x of JSON.parse(fs.readFileSync(SUBS_FILE, 'utf8'))) subs.set(x.sub.endpoint, x); } catch (e) {}
+let saveTimer = null;
+const saveSubs = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => { try { fs.writeFileSync(SUBS_FILE, JSON.stringify([...subs.values()])); } catch (e) {} }, 2000); };
+
+const PUSH_TXT = {
+  kickoff:{ fr:"Coup d'envoi", en:'Kick-off', es:'Comienza el partido', pt:'Começou o jogo', ar:'انطلقت المباراة', de:'Anpfiff', it:"Calcio d'inizio", tr:'Maç başladı' },
+  goal:   { fr:'But !', en:'Goal!', es:'¡Gol!', pt:'Gol!', ar:'هدف!', de:'Tor!', it:'Gol!', tr:'Gol!' },
+  final:  { fr:'Match terminé', en:'Full time', es:'Final del partido', pt:'Fim de jogo', ar:'نهاية المباراة', de:'Abpfiff', it:'Fine partita', tr:'Maç bitti' },
+  test:   { fr:'Notifications activées ✅', en:'Notifications on ✅', es:'Notificaciones activadas ✅', pt:'Notificações ativadas ✅', ar:'تم تفعيل الإشعارات ✅', de:'Benachrichtigungen aktiv ✅', it:'Notifiche attive ✅', tr:'Bildirimler açık ✅' },
+  testBody:{ fr:"Tu recevras les buts, coups d'envoi et fins de match de tes favoris.", en:"You'll get goals, kick-offs and final whistles for your favorites.", es:'Recibirás goles, inicios y finales de tus favoritos.', pt:'Você receberá gols, inícios e finais dos seus favoritos.', ar:'ستصلك أهداف ومواعيد انطلاق ونهايات مباريات مفضلتك.', de:'Du erhältst Tore, Anpfiffe und Abpfiffe deiner Favoriten.', it:'Riceverai gol, calci d\'inizio e fischi finali dei tuoi preferiti.', tr:'Favorilerinin golleri, başlangıç ve bitiş bildirimlerini alacaksın.' }
+};
+const ptxt = (k, lang) => (PUSH_TXT[k] && (PUSH_TXT[k][lang] || PUSH_TXT[k].fr)) || '';
+
+async function pushTo(entry, payload) {
+  try {
+    await webpush.sendNotification(entry.sub, JSON.stringify(payload), { TTL: 3600 });
+    return true;
+  } catch (e) {
+    if (e.statusCode === 404 || e.statusCode === 410) { subs.delete(entry.sub.endpoint); saveSubs(); }
+    else console.warn('push', e.statusCode || e.message);
+    return false;
+  }
+}
+const watched = entry => g => entry.matches.includes(String(g.id)) || entry.teams.includes(String(g.homeId)) || entry.teams.includes(String(g.awayId));
+
+// état connu de chaque match : détecte coup d'envoi, buts, fin
+const seen = new Map();   // id -> { status, hs, as }
+function detectEvents(games) {
+  const events = [];
+  for (const g of games) {
+    const id = String(g.id), prev = seen.get(id);
+    const hs = Number(g.hs) || 0, as = Number(g.as) || 0;
+    if (prev) {
+      if (prev.status !== 'live' && g.status === 'live') events.push({ type: 'kickoff', g });
+      if (g.status === 'live' && (hs > prev.hs || as > prev.as)) events.push({ type: 'goal', g });
+      if (prev.status === 'live' && g.status === 'final') events.push({ type: 'final', g });
+    }
+    seen.set(id, { status: g.status, hs, as });
+  }
+  return events;
+}
+async function notifyEvents(events) {
+  for (const ev of events) {
+    const g = ev.g, hs = Number(g.hs) || 0, as = Number(g.as) || 0;
+    for (const entry of [...subs.values()]) {
+      if (!watched(entry)(g)) continue;
+      const lang = entry.lang;
+      const body = ev.type === 'kickoff' ? `${g.home} – ${g.away}` : `${g.home} ${hs}-${as} ${g.away}${ev.type === 'goal' && g.minute ? ` (${String(g.minute).replace(/^(\d+)$/, "$1'")})` : ''}`;
+      await pushTo(entry, { title: (ev.type === 'goal' ? '⚽ ' : '') + ptxt(ev.type, lang), body, tag: `${ev.type}-${g.id}-${hs}-${as}`, url: './' });
+    }
+  }
+}
+// relève les matchs ; rythme adapté : vite quand un match suivi est en cours, lent sinon (économise le quota du fournisseur)
+let pollTimer = null;
+async function pollOnce() {
+  let wait = 10 * 60 * 1000;
+  try {
+    if (subs.size) {
+      const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=${dayIso(-1)}&to=${dayIso(1)}`, 60 * 1000);
+      const now = new Date();
+      const games = asList(raw).map(item => mapGame(item, now));
+      await notifyEvents(detectEvents(games));
+      const mine = games.filter(g => [...subs.values()].some(e => watched(e)(g)));
+      if (mine.some(g => g.status === 'live')) wait = 75 * 1000;
+      else {
+        const next = Math.min(...mine.filter(g => g.status === 'scheduled' && typeof g.ts === 'number' && g.ts > Date.now()).map(g => g.ts), Infinity);
+        if (next !== Infinity) wait = Math.max(60 * 1000, Math.min(wait, next - Date.now() - 2 * 60 * 1000));
+      }
+    }
+  } catch (e) { console.warn('push poll', e.message); wait = 3 * 60 * 1000; }
+  pollTimer = setTimeout(pollOnce, wait);
+}
+if (PUSH_ON) pollTimer = setTimeout(pollOnce, 20 * 1000);
+
+app.get('/api/push/key', (req, res) => res.json({ enabled: PUSH_ON, key: PUSH_ON ? VAPID_PUBLIC : null }));
+// POST /api/push/sync { subscription, teams:[id], matches:[id], lang }
+app.post('/api/push/sync', (req, res) => {
+  if (!PUSH_ON) return res.status(503).json({ error: 'Notifications indisponibles sur ce serveur.' });
+  const b = req.body || {};
+  const sub = b.subscription;
+  if (!sub || typeof sub.endpoint !== 'string' || !sub.keys) return res.status(400).json({ error: 'Abonnement invalide.' });
+  const ids = v => (Array.isArray(v) ? v : []).slice(0, 100).map(String);
+  const lang = Object.keys(PUSH_TXT.goal).includes(b.lang) ? b.lang : 'fr';
+  const first = !subs.has(sub.endpoint);
+  subs.set(sub.endpoint, { sub, teams: ids(b.teams), matches: ids(b.matches), lang });
+  saveSubs();
+  if (first && !pollTimer) pollTimer = setTimeout(pollOnce, 5000);
+  res.json({ ok: true });
+});
+app.post('/api/push/unsubscribe', (req, res) => {
+  const ep = req.body && req.body.endpoint;
+  if (ep) { subs.delete(ep); saveSubs(); }
+  res.json({ ok: true });
+});
+app.post('/api/push/test', async (req, res) => {
+  if (!PUSH_ON) return res.status(503).json({ error: 'Notifications indisponibles sur ce serveur.' });
+  const entry = subs.get(req.body && req.body.endpoint);
+  if (!entry) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  const ok = await pushTo(entry, { title: ptxt('test', entry.lang), body: ptxt('testBody', entry.lang), tag: 'test', url: './' });
+  res.json({ ok });
 });
 
 app.listen(PORT, () => {
