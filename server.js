@@ -1018,6 +1018,78 @@ app.get('/api/news', async (req, res) => {
 });
 
 
+/* ---------- RECHERCHE (clubs + joueurs) ---------- */
+// Index construit en arrière-plan : une requête « équipes » par championnat important, espacées, gardées en mémoire.
+const IDX = { teams: [], players: [], leagues: 0, done: 0, building: false, builtAt: 0 };
+const IDX_COUNTRIES = /^(England|Spain|Italy|Germany|France|Portugal|Netherlands|Belgium|Turkey|Scotland|Brazil|Argentina|USA|Saudi|Eurocups|Europe|World)/i;
+const IDX_SKIP = /women|femin|u19|u21|u23|u20|youth|reserve|ii\b|cup|coupe|copa|pokal|supercup|super cup|trophy|play-?off|qualif|friendl|league two|national league/i;
+const IDX_MAX_LEAGUES = 45;
+const IDX_GAP_MS = 2000;
+const nrm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+async function buildIndex(){
+  if (IDX.building) return;
+  IDX.building = true;
+  try {
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_leagues`, 6 * 60 * 60 * 1000);
+    const all = asList(raw).filter(x => x && x.league_id);
+    const mains = new Set(Object.values(LEAGUES).map(l => l.id));
+    const picked = [];
+    const seen = new Set();
+    for (const x of all){
+      const id = String(x.league_id);
+      if (seen.has(id)) continue;
+      const ok = mains.has(id) || (IDX_COUNTRIES.test(x.country_name || '') && !IDX_SKIP.test(x.league_name || ''));
+      if (ok){ seen.add(id); picked.push({ id, name: x.league_name, country: x.country_name }); }
+    }
+    // championnats principaux d'abord
+    picked.sort((a, b) => (mains.has(b.id) ? 1 : 0) - (mains.has(a.id) ? 1 : 0));
+    const list = picked.slice(0, IDX_MAX_LEAGUES);
+    IDX.leagues = list.length; IDX.done = 0;
+    const teams = [], players = [], seenTeam = new Set();
+    for (const lg of list){
+      try {
+        const t = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(lg.id)}`, 6 * 60 * 60 * 1000);
+        for (const team of asList(t)){
+          if (!team || !team.team_key) continue;
+          const key = lg.id + ':' + team.team_key;
+          if (seenTeam.has(key)) continue;
+          seenTeam.add(key);
+          const tm = { id: String(team.team_key), leagueId: lg.id, leagueName: lg.name, name: team.team_name, badge: team.team_badge || null, country: team.team_country || lg.country || null };
+          tm.n = nrm(tm.name + ' ' + (tm.country || ''));
+          teams.push(tm);
+          for (const p of arr(team.players)){
+            const mp = mapPlayer(p);
+            if (!mp.name) continue;
+            players.push({ n: nrm(mp.fullName + ' ' + mp.name), team: tm, player: mp });
+          }
+        }
+        IDX.teams = teams; IDX.players = players;   // résultats disponibles au fur et à mesure
+      } catch (e) { console.log('index', lg.name, e.message); }
+      IDX.done++;
+      await new Promise(r => setTimeout(r, IDX_GAP_MS));
+    }
+    IDX.builtAt = Date.now();
+  } catch (e) { console.log('index erreur', e.message); }
+  IDX.building = false;
+}
+setTimeout(buildIndex, 15000);
+setInterval(() => { if (Date.now() - IDX.builtAt > 12 * 3600 * 1000) buildIndex(); }, 30 * 60 * 1000);
+// GET /api/search?q=mbappe -> { teams:[…], players:[…], indexed, total, building }
+app.get('/api/search', (req, res) => {
+  const q = nrm(req.query.q);
+  if (q.length < 2) return res.json({ teams: [], players: [], indexed: IDX.done, total: IDX.leagues, building: IDX.building });
+  if (!IDX.teams.length && !IDX.building) buildIndex();
+  const words = q.split(/\s+/);
+  const match = n => words.every(w => n.includes(w));
+  const startsFirst = (a, b) => (b.n.startsWith(q) ? 1 : 0) - (a.n.startsWith(q) ? 1 : 0);
+  const teams = IDX.teams.filter(t => match(t.n)).sort(startsFirst).slice(0, 12)
+    .map(t => ({ id: t.id, leagueId: t.leagueId, leagueName: t.leagueName, name: t.name, badge: t.badge, country: t.country }));
+  const players = IDX.players.filter(p => match(p.n)).sort(startsFirst).slice(0, 20)
+    .map(p => ({ player: p.player, team: { id: p.team.id, leagueId: p.team.leagueId, name: p.team.name, badge: p.team.badge } }));
+  res.json({ teams, players, indexed: IDX.done, total: IDX.leagues, building: IDX.building });
+});
+
+
 app.listen(PORT, () => {
   console.log(`✅ Backend démarré sur le port ${PORT}`);
 });
