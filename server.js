@@ -1024,6 +1024,7 @@ const IDX = { teams: [], players: [], leagues: 0, done: 0, building: false, buil
 const IDX_COUNTRIES = /^(England|Spain|Italy|Germany|France|Portugal|Netherlands|Belgium|Turkey|Scotland|Brazil|Argentina|USA|Saudi|Eurocups|Europe|World)/i;
 const IDX_SKIP = /women|femin|u19|u21|u23|u20|youth|reserve|ii\b|cup|coupe|copa|pokal|supercup|super cup|trophy|play-?off|qualif|friendl|league two|national league/i;
 const IDX_MAX_LEAGUES = 45;
+const IDX_ALIAS = { 'psg': 'paris saint germain paris sg', 'man city': 'manchester city', 'man utd': 'manchester united', 'manchester utd': 'manchester united', 'atletico madrid': 'atletico de madrid', 'inter': 'internazionale inter milan', 'ac milan': 'milan' };
 const IDX_GAP_MS = 2000;
 const nrm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 async function buildIndex(){
@@ -1055,7 +1056,7 @@ async function buildIndex(){
           if (seenTeam.has(key)) continue;
           seenTeam.add(key);
           const tm = { id: String(team.team_key), leagueId: lg.id, leagueName: lg.name, name: team.team_name, badge: team.team_badge || null, country: team.team_country || lg.country || null };
-          tm.n = nrm(tm.name + ' ' + (tm.country || ''));
+          tm.n = nrm(tm.name + ' ' + (tm.country || '') + ' ' + (IDX_ALIAS[nrm(tm.name)] || ''));
           teams.push(tm);
           for (const p of arr(team.players)){
             const mp = mapPlayer(p);
