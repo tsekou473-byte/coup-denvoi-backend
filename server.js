@@ -1201,7 +1201,9 @@ async function findPhoto(team, name, fullName) {
     const isSoccer = p => /soccer|football/i.test(p.strSport || '');
     // Même nom complet (deux mots ou plus) : on accepte même si l'écriture du club diffère (« PSG » / « Paris SG »)
     const sameFull = p => wantFull.includes(' ') && fold(p.strPlayer).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim() === wantFull;
-    const ok = list.filter(p => isSoccer(p) && (sameTeamName(p.strTeam, team) || sameTeamName(p.strTeam2, team) || sameFull(p)));
+    // plusieurs joueurs du même nom (ex. deux « Luis Suárez ») : on n'accepte que celui du bon club, jamais un homonyme
+    const dupFull = list.filter(p => isSoccer(p) && sameFull(p)).length > 1;
+    const ok = list.filter(p => isSoccer(p) && (sameTeamName(p.strTeam, team) || sameTeamName(p.strTeam2, team) || (!dupFull && sameFull(p))));
     if (!ok.length) continue;
     const score = p => {
       const f = fold(p.strPlayer);
