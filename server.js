@@ -1124,7 +1124,7 @@ app.get('/api/h2h', async (req, res) => {
     res.json({ summary: s, matches: games.slice(0, 10) });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Erreur confrontations.', detail: err.message || String(err) });
+    res.status(req.query.debug ? 200 : 500).json({ error: 'Erreur confrontations.', detail: err.message || String(err) });
   }
 });
 
