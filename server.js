@@ -1616,6 +1616,7 @@ async function notifyEvents(events) {
 }
 // relève les matchs ; rythme adapté : vite quand un match suivi est en cours, lent sinon (économise le quota du fournisseur)
 let pollTimer = null;
+let lastKick = 0;
 async function pollOnce() {
   let wait = 10 * 60 * 1000;
   try {
@@ -1648,8 +1649,9 @@ app.post('/api/push/sync', (req, res) => {
   const first = !subs.has(sub.endpoint);
   subs.set(sub.endpoint, { sub, teams: ids(b.teams), matches: ids(b.matches), lang });
   saveSubs();
-  if (first && !pollTimer) pollTimer = setTimeout(pollOnce, 5000);
-  res.json({ ok: true });
+  // un abonné nouveau ou qui revient (ex. après un redémarrage du serveur) : on relève les matchs tout de suite
+  if (Date.now() - lastKick > 20 * 1000) { lastKick = Date.now(); clearTimeout(pollTimer); pollTimer = setTimeout(pollOnce, 3000); }
+  res.json({ ok: true, known: subs.size });
 });
 app.post('/api/push/unsubscribe', (req, res) => {
   const ep = req.body && req.body.endpoint;
