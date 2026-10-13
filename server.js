@@ -1189,6 +1189,17 @@ app.get('/api/predictions', async (req, res) => {
   }
 });
 
+// diagnostic temporaire : cotes brutes d'un jour
+app.get('/api/odds-debug', async (req, res) => {
+  try {
+    const day = req.query.date;
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_odds&from=${day}&to=${day}`, 30 * 60 * 1000);
+    const list = asList(raw);
+    const ids = new Set(list.map(x => x.match_id));
+    res.json({ rows: list.length, matches: ids.size, sample: list.slice(0, 2), type: Array.isArray(raw) ? 'array' : typeof raw, keys: !Array.isArray(raw) && raw ? Object.keys(raw).slice(0, 6) : null });
+  } catch (err) { res.json({ error: err.message }); }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Backend démarré sur le port ${PORT}`);
 });
