@@ -1133,7 +1133,7 @@ app.get('/api/h2h', async (req, res) => {
     const { a, b, an, bn } = req.query;
     if (!a || !b) return res.status(400).json({ error: 'Paramètres a et b requis.' });
     const toNum = v => (v === '' || v == null || isNaN(+v)) ? null : +v;
-    let out = { summary: null, matches: [] }, source = '';
+    let out = { summary: null, matches: [] }, source = ''; const dbg = [];
     if (isAfr(a) && isAfr(b)) {
       const data = await cachedFetchDirect(`https://${APISPORTS_HOST}/fixtures/headtohead?h2h=${stripAfr(a)}-${stripAfr(b)}`, 7 * 24 * 3600 * 1000);
       const games = arr(data.response).filter(f => f && f.fixture && f.goals && f.goals.home != null && f.goals.away != null).map(f => ({
@@ -1150,15 +1150,16 @@ app.get('/api/h2h', async (req, res) => {
           home: x.match_hometeam_name, away: x.match_awayteam_name, hs: toNum(x.match_hometeam_score), as: toNum(x.match_awayteam_score), league: x.league_name || ''
         })).filter(g => g.hs != null && g.as != null);
         out = summarizeH2H(games, a); source = 'p1';
-      } catch (e) { console.log('h2h p1', e.message); }
+      } catch (e) { console.log('h2h p1', e.message); dbg.push('p1: ' + e.message); }
       if (out.matches.length < 6 && an && bn && APISPORTS_KEY) {
         try {
           const o2 = await sportsH2H(an, bn);
+          if (!o2) dbg.push('sports: équipe introuvable');
           if (o2 && o2.summary.total > (out.summary ? out.summary.total : 0)) { out = o2; source = 'api-sports'; }
-        } catch (e) { console.log('h2h sports', e.message); }
+        } catch (e) { console.log('h2h sports', e.message); dbg.push('sports: ' + e.message); }
       }
     }
-    res.json({ ...out, source });
+    res.json(req.query.debug ? { ...out, source, dbg } : { ...out, source });
   } catch (err) {
     console.error(err);
     res.status(req.query.debug ? 200 : 500).json({ error: 'Erreur confrontations.', detail: err.message || String(err) });
