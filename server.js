@@ -1308,9 +1308,17 @@ app.get('/api/club', async (req, res) => {
     const key = 'club|' + fold(name) + '|' + lang;
     const hit = histGet(key);
     if (hit) return res.json({ club: hit.v });
-    const j = await tsdbJson('searchteams.php', 't=' + encodeURIComponent(name.replace(/\s+/g, '_')));
-    if (!j || !('teams' in j)) { const e = new Error('limite'); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
-    const t = arr(j.teams).filter(x => /soccer|football/i.test(x.strSport || '')).find(x => sameTeamName(x.strTeam, name) || sameTeamName(x.strTeamAlternate, name));
+    // noms écrits à la façon du fournisseur de matchs (« PSG », « Man Utd »…) : on essaie plusieurs écritures
+    const ALIAS = { psg: ['Paris Saint-Germain', 'Paris SG'], 'paris sg': ['Paris Saint-Germain'], om: ['Marseille'], ol: ['Lyon'], inter: ['Inter Milan', 'Internazionale'], 'atl madrid': ['Atletico Madrid'], 'atletico madrid': ['Atletico Madrid'], barca: ['Barcelona'], spurs: ['Tottenham Hotspur'], wolves: ['Wolverhampton Wanderers'], leipzig: ['RB Leipzig'], dortmund: ['Borussia Dortmund'], leverkusen: ['Bayer Leverkusen'], gladbach: ['Borussia Monchengladbach'], betis: ['Real Betis'], sociedad: ['Real Sociedad'], 'club brugge kv': ['Club Brugge'], 'bayern munich': ['Bayern Munich', 'Bayern Munchen'], 'sporting cp': ['Sporting CP'] };
+    const base = name.replace(/\bUtd\b/gi, 'United').replace(/\bAtl\.?\b/gi, 'Atletico').replace(/\bSt\.?\s/gi, 'Saint ').replace(/^Man\s+/i, 'Manchester ').replace(/\s+(FC|AFC|CF|SC|KV|SK|FK|BK|AS|AC)$/i, '').replace(/^(FC|AFC|CF|SC|AS|AC|SK|FK)\s+/i, '').trim();
+    const terms = [...new Set([name, ...(ALIAS[fold(name).replace(/[^a-z ]/g, '').trim()] || []), ...(ALIAS[fold(base).replace(/[^a-z ]/g, '').trim()] || []), base].filter(Boolean))].slice(0, 4);
+    let t = null;
+    for (const term of terms) {
+      const j = await tsdbJson('searchteams.php', 't=' + encodeURIComponent(term.replace(/\s+/g, '_')));
+      if (!j || !('teams' in j)) { const e = new Error('limite'); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
+      t = arr(j.teams).filter(x => /soccer|football/i.test(x.strSport || '')).find(x => sameTeamName(x.strTeam, name) || sameTeamName(x.strTeamAlternate, name) || sameTeamName(x.strTeam, term));
+      if (t) break;
+    }
     let club = null;
     if (t) club = {
       name: t.strTeam, formed: t.intFormedYear || null, stadium: t.strStadium || '', location: t.strLocation || '', country: t.strCountry || '',
