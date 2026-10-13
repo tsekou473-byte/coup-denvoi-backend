@@ -1168,6 +1168,27 @@ app.get('/api/h2h', async (req, res) => {
   }
 });
 
+/* ---------- PRONOSTICS (probabilités de victoire) ---------- */
+// GET /api/predictions?date=2026-10-13  (jour « Paris », comme /api/fixtures) -> { predictions: { matchId: { h, d, a } } }
+app.get('/api/predictions', async (req, res) => {
+  try {
+    const day = req.query.date;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day || '')) return res.status(400).json({ error: 'Paramètre date (AAAA-MM-JJ) requis.' });
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_predictions&from=${day}&to=${day}`, 60 * 60 * 1000);
+    const list = asList(raw);
+    if (req.query.debug) return res.json({ n: list.length, sample: list.slice(0, 2), type: typeof raw, keys: raw && !Array.isArray(raw) ? Object.keys(raw) : null });
+    const out = {};
+    for (const x of list) {
+      const h = parseFloat(x.prob_HW), d = parseFloat(x.prob_D), a = parseFloat(x.prob_AW);
+      if (x.match_id && [h, d, a].every(v => isFinite(v))) out[String(x.match_id)] = { h, d, a };
+    }
+    res.json({ predictions: out });
+  } catch (err) {
+    console.error(err);
+    res.status(req.query.debug ? 200 : 500).json({ error: 'Erreur pronostics.', detail: err.message || String(err) });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Backend démarré sur le port ${PORT}`);
 });
