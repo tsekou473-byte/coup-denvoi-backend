@@ -737,6 +737,21 @@ async function espnSquad(slug, teamId) {
   return { id: AFR_PREFIX + id, name: t.displayName || t.name || '', badge: (arr(t.logos)[0] || {}).href || t.logo || null, country: null, players };
 }
 
+
+// Diagnostic temporaire : structure d'une fiche ESPN (à retirer avant le lancement)
+app.get('/api/espn-debug', async (req, res) => {
+  try {
+    const { slug, event } = req.query;
+    const d = await espnGet(`${ESPN_BASE}/${slug}/summary?event=${encodeURIComponent(event)}`, 30 * 1000);
+    const r = arr(d.rosters);
+    res.json({
+      keys: Object.keys(d),
+      rosters: r.map(x => ({ homeAway: x.homeAway, keys: Object.keys(x), formation: x.formation, n: arr(x.roster).length, sample: arr(x.roster)[0] || null })),
+      keyEvents: arr(d.keyEvents).length, details: arr(d.header && d.header.competitions && d.header.competitions[0] && d.header.competitions[0].details).length,
+      box: arr(d.boxscore && d.boxscore.teams).map(t => arr(t.statistics).length), commentary: arr(d.commentary).length, plays: arr(d.plays).length
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 const afrStandingsBlocked = new Map();   // compétition -> moment où le blocage a été constaté (évite de gaspiller des appels)
 
 /* ============================= Routes ============================= */
