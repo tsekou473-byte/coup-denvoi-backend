@@ -1189,15 +1189,78 @@ app.get('/api/predictions', async (req, res) => {
   }
 });
 
-// diagnostic temporaire : cotes brutes d'un jour
-app.get('/api/odds-debug', async (req, res) => {
+/* ---------- PROBABILITÉS DE VICTOIRE POUR TOUS LES MATCHS ---------- */
+// 1) pronostic du fournisseur  2) cotes du marché (moyenne des bookmakers)  3) modèle maison (classement + buts marqués/encaissés)
+async function dayPredictions(day) {
+  const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_predictions&from=${day}&to=${day}`, 60 * 60 * 1000);
+  const out = {};
+  for (const x of asList(raw)) {
+    const h = parseFloat(x.prob_HW), d = parseFloat(x.prob_D), a = parseFloat(x.prob_AW);
+    if (x.match_id && [h, d, a].every(v => isFinite(v))) out[String(x.match_id)] = { h, d, a };
+  }
+  return out;
+}
+async function dayOdds(day) {
+  const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_odds&from=${day}&to=${day}`, 30 * 60 * 1000);
+  const acc = {};
+  for (const x of asList(raw)) {
+    const o1 = parseFloat(x.odd_1), ox = parseFloat(x.odd_x), o2 = parseFloat(x.odd_2);
+    if (!x.match_id || ![o1, ox, o2].every(v => isFinite(v) && v > 1)) continue;
+    const i1 = 1 / o1, ix = 1 / ox, i2 = 1 / o2, t = i1 + ix + i2;
+    const a = acc[String(x.match_id)] || (acc[String(x.match_id)] = { h: 0, d: 0, a: 0, n: 0 });
+    a.h += i1 / t; a.d += ix / t; a.a += i2 / t; a.n++;
+  }
+  const out = {};
+  for (const [id, a] of Object.entries(acc)) out[id] = { h: 100 * a.h / a.n, d: 100 * a.d / a.n, a: 100 * a.a / a.n };
+  return out;
+}
+const modelStand = new Map();   // league_id -> { rows, at }
+async function standingsForModel(leagueId) {
+  const hit = modelStand.get(leagueId);
+  if (hit && Date.now() - hit.at < 12 * 3600 * 1000) return hit.rows;
+  let rows = [];
   try {
-    const day = req.query.date;
-    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_odds&from=${day}&to=${day}`, 30 * 60 * 1000);
-    const list = asList(raw);
-    const ids = new Set(list.map(x => x.match_id));
-    res.json({ rows: list.length, matches: ids.size, sample: list.slice(0, 2), type: Array.isArray(raw) ? 'array' : typeof raw, keys: !Array.isArray(raw) && raw ? Object.keys(raw).slice(0, 6) : null });
-  } catch (err) { res.json({ error: err.message }); }
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_standings&league_id=${encodeURIComponent(leagueId)}`, 10 * 60 * 1000);
+    rows = asList(raw).filter(x => x && x.team_name).map(mapStanding);
+  } catch (e) { if (hit) return hit.rows; throw e; }
+  modelStand.set(leagueId, { rows, at: Date.now() });
+  return rows;
+}
+function poissonModel(rows, homeId, awayId) {
+  const tm = id => rows.filter(r => String(r.teamId) === String(id) && r.played > 0).sort((a, b) => b.played - a.played)[0];
+  const H = tm(homeId), A = tm(awayId);
+  if (!H || !A) return null;
+  const valid = rows.filter(r => r.played > 0 && r.gf != null && r.ga != null);
+  const P = valid.reduce((s, r) => s + r.played, 0), G = valid.reduce((s, r) => s + r.gf, 0);
+  if (!P || !G) return null;
+  const avg = G / P, K = 5;
+  const att = r => ((r.gf + K * avg) / (r.played + K)) / avg;
+  const def = r => ((r.ga + K * avg) / (r.played + K)) / avg;
+  const lh = avg * 1.12 * att(H) * def(A), la = avg * 0.9 * att(A) * def(H);
+  const pois = (l, k) => { let p = Math.exp(-l); for (let i = 1; i <= k; i++) p *= l / i; return p; };
+  let ph = 0, pd = 0, pa = 0;
+  for (let i = 0; i <= 9; i++) for (let j = 0; j <= 9; j++) {
+    const p = pois(lh, i) * pois(la, j);
+    if (i > j) ph += p; else if (i === j) pd += p; else pa += p;
+  }
+  const t = ph + pd + pa;
+  return { h: 100 * ph / t, d: 100 * pd / t, a: 100 * pa / t };
+}
+// GET /api/winprob?match=ID&date=AAAA-MM-JJ&league=ID&home=ID&away=ID -> { h, d, a, source } ou { source:null }
+app.get('/api/winprob', async (req, res) => {
+  const { match, date, league, home, away } = req.query;
+  if (!match || !/^\d{4}-\d{2}-\d{2}$/.test(date || '') || isAfr(String(match))) return res.json({ source: null });
+  const done = (p, source) => res.json({ h: Math.round(p.h * 10) / 10, d: Math.round(p.d * 10) / 10, a: Math.round(p.a * 10) / 10, source });
+  const errs = [];
+  try { const p = (await dayPredictions(date))[String(match)]; if (p) return done(p, 'provider'); } catch (e) { errs.push('pred: ' + e.message); }
+  try { const p = (await dayOdds(date))[String(match)]; if (p) return done(p, 'odds'); } catch (e) { errs.push('odds: ' + e.message); }
+  try {
+    if (league && home && away && !isAfr(String(league))) {
+      const p = poissonModel(await standingsForModel(String(league)), home, away);
+      if (p) return done(p, 'model');
+    }
+  } catch (e) { errs.push('model: ' + e.message); }
+  res.json(req.query.debug ? { source: null, errs } : { source: null });
 });
 
 app.listen(PORT, () => {
