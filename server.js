@@ -1306,7 +1306,7 @@ app.get('/api/club', async (req, res) => {
     const lang = String(req.query.lang || 'fr').slice(0, 2);
     if (!name) return res.json({ club: null });
     const key = 'club|' + fold(name) + '|' + lang;
-    const hit = histGet(key);
+    const hit = req.query.debug ? null : histGet(key);
     if (hit) return res.json({ club: hit.v });
     // noms écrits à la façon du fournisseur de matchs (« PSG », « Man Utd »…) : on essaie plusieurs écritures
     const ALIAS = { psg: ['Paris Saint-Germain', 'Paris SG'], 'paris sg': ['Paris Saint-Germain'], om: ['Marseille'], ol: ['Lyon'], inter: ['Inter Milan', 'Internazionale', 'FC Internazionale Milano'], 'atl madrid': ['Atletico Madrid'], 'atletico madrid': ['Atletico Madrid'], barca: ['Barcelona'], spurs: ['Tottenham Hotspur'], wolves: ['Wolverhampton Wanderers'], leipzig: ['RB Leipzig'], dortmund: ['Borussia Dortmund'], leverkusen: ['Bayer Leverkusen'], gladbach: ['Borussia Monchengladbach'], betis: ['Real Betis'], sociedad: ['Real Sociedad'], 'club brugge kv': ['Club Brugge'], 'bayern munich': ['Bayern Munich', 'Bayern Munchen'], 'sporting cp': ['Sporting CP'] };
@@ -1321,6 +1321,7 @@ app.get('/api/club', async (req, res) => {
       const names = x => [x.strTeam, x.strTeamShort, ...String(x.strTeamAlternate || '').split(',')].map(nz).filter(Boolean);
       const cands = arr(j.teams).filter(x => /soccer|football/i.test(x.strSport || ''));
       t = cands.find(x => names(x).some(n => wanted.has(n)));
+      if (req.query.debug) (req._dbg = req._dbg || []).push({ term, got: cands.map(x => x.strTeam + ' | ' + (x.strTeamAlternate || '') + ' | ' + (x.strTeamShort || '')).slice(0, 8), raw: j.teams ? j.teams.length : 0 });
       if (t) break;
     }
     let club = null;
@@ -1330,8 +1331,8 @@ app.get('/api/club', async (req, res) => {
       keywords: t.strKeywords || '', badge: t.strBadge || null, fanart: t.strFanart1 || null,
       text: shortText(pickText(t, lang, 'strDescription'), 1800)
     };
-    histSet(key, club, club ? HIST_TTL : HIST_MISS_TTL);
-    res.json({ club });
+    if (!req.query.debug) histSet(key, club, club ? HIST_TTL : HIST_MISS_TTL);
+    res.json(req.query.debug ? { club, terms, dbg: req._dbg } : { club });
   } catch (err) {
     if (err.paused) return res.json({ club: null, paused: true, why: err.message });
     res.status(500).json({ error: err.message || String(err) });
