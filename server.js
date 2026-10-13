@@ -1229,14 +1229,16 @@ const histCache = new Map();   // clé -> { v, exp }
 const histGet = k => { const h = histCache.get(k); return h && h.exp > Date.now() ? h : null; };
 const histSet = (k, v, ttl) => { histCache.set(k, { v, exp: Date.now() + ttl }); if (histCache.size > 3000) histCache.delete(histCache.keys().next().value); };
 // même limiteur que les photos (la clé gratuite limite le nombre de demandes par minute)
+let histNextSlot = 0, histBlockedUntil = 0;
 async function tsdbJson(endpoint, query) {
-  if (Date.now() < tsdbBlockedUntil) { const e = new Error('pause'); e.paused = true; throw e; }
-  const now0 = Date.now(), wait = Math.max(0, tsdbNextSlot - now0);
-  if (wait > 30000) { const e = new Error('file trop longue'); e.paused = true; throw e; }
-  tsdbNextSlot = now0 + wait + TSDB_GAP_MS;
+  // file d'attente propre à l'histoire (les photos de joueurs ont la leur et peuvent être longues)
+  if (Date.now() < histBlockedUntil) { const e = new Error('pause'); e.paused = true; throw e; }
+  const now0 = Date.now(), wait = Math.max(0, histNextSlot - now0);
+  if (wait > 25000) { const e = new Error('file trop longue'); e.paused = true; throw e; }
+  histNextSlot = now0 + wait + 1200;
   if (wait) await sleep(wait);
   const res = await fetch(`https://www.thesportsdb.com/api/v1/json/${encodeURIComponent(TSDB_KEY)}/${endpoint}?${query}`);
-  if (res.status === 429) { tsdbBlockedUntil = Date.now() + 65 * 1000; const e = new Error('limite'); e.paused = true; throw e; }
+  if (res.status === 429) { histBlockedUntil = Date.now() + 30 * 1000; const e = new Error('limite'); e.paused = true; throw e; }
   if (!res.ok) throw new Error('TheSportsDB ' + res.status);
   return res.json().catch(() => null);
 }
@@ -1263,7 +1265,7 @@ app.get('/api/club', async (req, res) => {
     const hit = histGet(key);
     if (hit) return res.json({ club: hit.v });
     const j = await tsdbJson('searchteams.php', 't=' + encodeURIComponent(name.replace(/\s+/g, '_')));
-    if (!j || !('teams' in j)) { const e = new Error('limite'); e.paused = true; tsdbBlockedUntil = Date.now() + 65 * 1000; throw e; }
+    if (!j || !('teams' in j)) { const e = new Error('limite'); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
     const t = arr(j.teams).filter(x => /soccer|football/i.test(x.strSport || '')).find(x => sameTeamName(x.strTeam, name) || sameTeamName(x.strTeamAlternate, name));
     let club = null;
     if (t) club = {
@@ -1297,7 +1299,7 @@ app.get('/api/player-history', async (req, res) => {
     let found = null;
     for (const term of terms) {
       const j = await tsdbJson('searchplayers.php', 'p=' + encodeURIComponent(term.replace(/\s+/g, '_')));
-      if (!j || !('player' in j)) { const e = new Error('limite'); e.paused = true; tsdbBlockedUntil = Date.now() + 65 * 1000; throw e; }
+      if (!j || !('player' in j)) { const e = new Error('limite'); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
       const list = arr(j.player).filter(p => /soccer|football/i.test(p.strSport || ''));
       const sameFull = p => wantFull.includes(' ') && fold(p.strPlayer).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim() === wantFull;
       const dup = list.filter(sameFull).length > 1;
