@@ -1309,14 +1309,18 @@ app.get('/api/club', async (req, res) => {
     const hit = histGet(key);
     if (hit) return res.json({ club: hit.v });
     // noms écrits à la façon du fournisseur de matchs (« PSG », « Man Utd »…) : on essaie plusieurs écritures
-    const ALIAS = { psg: ['Paris Saint-Germain', 'Paris SG'], 'paris sg': ['Paris Saint-Germain'], om: ['Marseille'], ol: ['Lyon'], inter: ['Inter Milan', 'Internazionale'], 'atl madrid': ['Atletico Madrid'], 'atletico madrid': ['Atletico Madrid'], barca: ['Barcelona'], spurs: ['Tottenham Hotspur'], wolves: ['Wolverhampton Wanderers'], leipzig: ['RB Leipzig'], dortmund: ['Borussia Dortmund'], leverkusen: ['Bayer Leverkusen'], gladbach: ['Borussia Monchengladbach'], betis: ['Real Betis'], sociedad: ['Real Sociedad'], 'club brugge kv': ['Club Brugge'], 'bayern munich': ['Bayern Munich', 'Bayern Munchen'], 'sporting cp': ['Sporting CP'] };
+    const ALIAS = { psg: ['Paris Saint-Germain', 'Paris SG'], 'paris sg': ['Paris Saint-Germain'], om: ['Marseille'], ol: ['Lyon'], inter: ['Inter Milan', 'Internazionale', 'FC Internazionale Milano'], 'atl madrid': ['Atletico Madrid'], 'atletico madrid': ['Atletico Madrid'], barca: ['Barcelona'], spurs: ['Tottenham Hotspur'], wolves: ['Wolverhampton Wanderers'], leipzig: ['RB Leipzig'], dortmund: ['Borussia Dortmund'], leverkusen: ['Bayer Leverkusen'], gladbach: ['Borussia Monchengladbach'], betis: ['Real Betis'], sociedad: ['Real Sociedad'], 'club brugge kv': ['Club Brugge'], 'bayern munich': ['Bayern Munich', 'Bayern Munchen'], 'sporting cp': ['Sporting CP'] };
     const base = name.replace(/\bUtd\b/gi, 'United').replace(/\bAtl\.?\b/gi, 'Atletico').replace(/\bSt\.?\s/gi, 'Saint ').replace(/^Man\s+/i, 'Manchester ').replace(/\s+(FC|AFC|CF|SC|KV|SK|FK|BK|AS|AC)$/i, '').replace(/^(FC|AFC|CF|SC|AS|AC|SK|FK)\s+/i, '').trim();
     const terms = [...new Set([name, ...(ALIAS[fold(name).replace(/[^a-z ]/g, '').trim()] || []), ...(ALIAS[fold(base).replace(/[^a-z ]/g, '').trim()] || []), base].filter(Boolean))].slice(0, 4);
     let t = null;
     for (const term of terms) {
       const j = await tsdbJson('searchteams.php', 't=' + encodeURIComponent(term.replace(/\s+/g, '_')));
       if (!j || !('teams' in j)) { const e = new Error('limite'); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
-      t = arr(j.teams).filter(x => /soccer|football/i.test(x.strSport || '')).find(x => sameTeamName(x.strTeam, name) || sameTeamName(x.strTeamAlternate, name) || sameTeamName(x.strTeam, term));
+      const nz = v => fold(v).replace(/[^a-z0-9]/g, '').replace(/^(fc|cf|afc|sc|ac|as)/, '').replace(/(fc|cf|afc|sc)$/, '');
+      const wanted = new Set(terms.map(nz).concat([nz(name), nz(base)]));
+      const names = x => [x.strTeam, x.strTeamShort, ...String(x.strTeamAlternate || '').split(',')].map(nz).filter(Boolean);
+      const cands = arr(j.teams).filter(x => /soccer|football/i.test(x.strSport || ''));
+      t = cands.find(x => names(x).some(n => wanted.has(n)));
       if (t) break;
     }
     let club = null;
