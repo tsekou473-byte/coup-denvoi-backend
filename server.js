@@ -226,7 +226,9 @@ function mapGame(item, now) {
     comp: item.league_name,
     leagueId: item.league_id,
     country: item.country_name,
-    countryLogo: item.country_logo || null
+    countryLogo: item.country_logo || null,
+    rcH: arr(item.cards).filter(c => c.home_fault && /red/i.test(c.card || '')).length,
+    rcA: arr(item.cards).filter(c => c.away_fault && /red/i.test(c.card || '')).length
   };
 }
 
@@ -591,7 +593,9 @@ function mapEspnEvent(ev, slug) {
     homeId: AFR_PREFIX + home.team.id, awayId: AFR_PREFIX + away.team.id,
     homeLogo: home.team.logo || null, awayLogo: away.team.logo || null,
     hs: sc(home), as: sc(away),
-    comp: meta.name || slug, leagueId: AFR_PREFIX + (num || ''), country: meta.country || 'Africa', countryLogo: null
+    comp: meta.name || slug, leagueId: AFR_PREFIX + (num || ''), country: meta.country || 'Africa', countryLogo: null,
+    rcH: arr(comp.details).filter(d => d.redCard && String(d.team?.id) === String(home.team.id)).length,
+    rcA: arr(comp.details).filter(d => d.redCard && String(d.team?.id) === String(away.team.id)).length
   };
 }
 
