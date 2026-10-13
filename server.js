@@ -1051,7 +1051,7 @@ async function buildIndex(){
         const t = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(lg.id)}`, 6 * 60 * 60 * 1000);
         for (const team of asList(t)){
           if (!team || !team.team_key) continue;
-          const key = lg.id + ':' + team.team_key;
+          const key = String(team.team_key);   // un club joue plusieurs compétitions : on le garde une fois (championnat principal d'abord)
           if (seenTeam.has(key)) continue;
           seenTeam.add(key);
           const tm = { id: String(team.team_key), leagueId: lg.id, leagueName: lg.name, name: team.team_name, badge: team.team_badge || null, country: team.team_country || lg.country || null };
