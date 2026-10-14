@@ -999,6 +999,7 @@ app.get('/api/standings-at', async (req, res) => {
     const end = new Date(Date.parse(date + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
     if (end < start) return res.json({ rows: [], note: 'Début de saison : aucun match joué avant celui-ci.' });
     const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=${start}&to=${end}&league_id=${encodeURIComponent(league_id)}`, 30 * 24 * 3600 * 1000);
+    if (req.query.debug) { const c = {}; asList(raw).forEach(x => { const k = (x.match_round || '') + ' | ' + (x.stage_name || ''); c[k] = (c[k] || 0) + 1; }); return res.json({ n: asList(raw).length, rounds: c, keys: Object.keys(asList(raw)[0] || {}) }); }
     const now = new Date();
     const games = asList(raw).map(x => mapGame(x, now)).filter(g => g.status === 'final' && g.hs != null && g.as != null && g.date < date && !/play-?off|final|round of|1\/|knockout|qualif/i.test(String((asList(raw).find(x => String(x.match_id) === String(g.id)) || {}).match_round || '')));
     const T = new Map();
