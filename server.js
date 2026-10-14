@@ -1002,15 +1002,21 @@ app.get('/api/standings-at', async (req, res) => {
     if (req.query.debug) { const c = {}; asList(raw).forEach(x => { const k = (x.match_round || '') + ' | ' + (x.stage_name || ''); c[k] = (c[k] || 0) + 1; }); return res.json({ n: asList(raw).length, rounds: c, keys: Object.keys(asList(raw)[0] || {}) }); }
     const now = new Date();
     const KO = /qualif|prelim|play-?off|final|round of|1\/|knockout|8th|16th|32nd|eliminat/i;
-    const items = asList(raw).filter(x => !KO.test(String(x.match_round || '')));
-    const stageNames = new Set(items.map(x => String(x.stage_name || '')));
-    const multi = stageNames.size > 1;
+    const items = asList(raw).filter(x => !KO.test(String(x.match_round || '') + ' ' + String(x.stage_name || '')));
+    // phase de groupes : les groupes ne sont pas indiqués, on les retrouve (les équipes d'un même groupe se rencontrent entre elles)
+    const par = new Map(); const fnd = k => { while (par.get(k) !== k) { par.set(k, par.get(par.get(k))); k = par.get(k); } return k; };
+    const isGrp = x => /group/i.test(String(x.stage_name || '') + ' ' + String(x.match_round || ''));
+    items.filter(isGrp).forEach(x => { const h = String(x.match_hometeam_id), a = String(x.match_awayteam_id); if (!par.has(h)) par.set(h, h); if (!par.has(a)) par.set(a, a); par.set(fnd(h), fnd(a)); });
+    const grpName = new Map(); const grpOf = x => { const r = fnd(String(x.match_hometeam_id)); if (!grpName.has(r)) grpName.set(r, null); return r; };
+    items.filter(isGrp).forEach(grpOf);
+    [...grpName.keys()].map(r => ({ r, min: items.filter(x => isGrp(x) && fnd(String(x.match_hometeam_id)) === r).map(x => String(x.match_hometeam_name)).sort()[0] })).sort((x, y2) => x.min.localeCompare(y2.min)).forEach((o, i) => grpName.set(o.r, 'Group ' + String.fromCharCode(65 + i % 26) + (i >= 26 ? Math.floor(i / 26) : '')));
+    const multi = grpName.size > 1;
     const T = new Map();
     const row = (stage, id, name, badge) => { const k = stage + '|' + (id || name); if (!T.has(k)) T.set(k, { teamId: id, team: name, badge: badge || null, played: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0, zone: '', stage }); return T.get(k); };
     for (const x of items) {
       const g = mapGame(x, now);
       if (!(g.status === 'final' && g.hs != null && g.as != null && g.date < date)) continue;
-      const st = multi ? String(x.stage_name || '') : '';
+      const st = multi && isGrp(x) ? grpName.get(fnd(String(x.match_hometeam_id))) : '';
       const h = row(st, g.homeId, g.home, g.homeLogo), a = row(st, g.awayId, g.away, g.awayLogo);
       const hs = +g.hs, as = +g.as;
       h.played++; a.played++; h.gf += hs; h.ga += as; a.gf += as; a.ga += hs;
