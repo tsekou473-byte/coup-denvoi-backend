@@ -1009,7 +1009,7 @@ app.get('/api/standings-at', async (req, res) => {
     items.filter(isGrp).forEach(x => { const h = String(x.match_hometeam_id), a = String(x.match_awayteam_id); if (!par.has(h)) par.set(h, h); if (!par.has(a)) par.set(a, a); par.set(fnd(h), fnd(a)); });
     const grpName = new Map(); const grpOf = x => { const r = fnd(String(x.match_hometeam_id)); if (!grpName.has(r)) grpName.set(r, null); return r; };
     items.filter(isGrp).forEach(grpOf);
-    [...grpName.keys()].map(r => ({ r, min: items.filter(x => isGrp(x) && fnd(String(x.match_hometeam_id)) === r).map(x => String(x.match_hometeam_name)).sort()[0] })).sort((x, y2) => x.min.localeCompare(y2.min)).forEach((o, i) => grpName.set(o.r, 'Group ' + String.fromCharCode(65 + i % 26) + (i >= 26 ? Math.floor(i / 26) : '')));
+    [...grpName.keys()].map(r => ({ r, min: items.filter(x => isGrp(x) && fnd(String(x.match_hometeam_id)) === r).map(x => String(x.match_hometeam_name)).sort()[0] })).sort((x, y2) => x.min.localeCompare(y2.min)).forEach((o, i) => grpName.set(o.r, 'Group ' + (i + 1)));
     const multi = grpName.size > 1;
     const T = new Map();
     const row = (stage, id, name, badge) => { const k = stage + '|' + (id || name); if (!T.has(k)) T.set(k, { teamId: id, team: name, badge: badge || null, played: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0, zone: '', stage }); return T.get(k); };
