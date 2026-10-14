@@ -1299,6 +1299,37 @@ function shortText(t, max) {
   return (i > max * 0.5 ? cut.slice(0, i + 1) : cut.replace(/\s+\S*$/, '') + '…');
 }
 
+
+// ---- Wikipédia : texte d'histoire des clubs et biographies des joueurs (dans la langue de l'app) ----
+// Pas de clé, pas de quota serré : sert de source principale pour le texte, et de secours quand TheSportsDB est saturé.
+const WIKI_LANGS = ['fr', 'en', 'es', 'pt', 'ar', 'de', 'it', 'tr'];
+const FOOT_RE = /football|soccer|fútbol|futebol|calcio|fußball|fussball|futbol|كرة القدم|كرة قدم/i;
+async function wikiSearch(lang, query, limit) {
+  const url = `https://${lang}.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=${limit || 4}` +
+    `&prop=extracts|description&exintro=1&explaintext=1&exchars=1800&redirects=1&format=json&formatversion=2`;
+  const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'CoupDEnvoi/1.0 (contact: tsekou473@gmail.com)', 'Accept': 'application/json' }, signal: ctl.signal });
+    if (!r.ok) return [];
+    const j = await r.json();
+    return arr(j && j.query && j.query.pages).sort((a, b) => (a.index || 0) - (b.index || 0));
+  } catch (e) { return []; } finally { clearTimeout(to); }
+}
+// terms : écritures possibles du nom ; ok(page) : la page est-elle bien la bonne ?
+async function wikiText(lang, terms, suffixes, ok) {
+  const langs = [...new Set([WIKI_LANGS.includes(lang) ? lang : 'en', 'en'])];
+  for (const l of langs) {
+    for (const term of terms) {
+      for (const suf of suffixes) {
+        const pages = await wikiSearch(l, `${term} ${suf}`.trim(), 4);
+        const p = pages.find(x => x.extract && x.extract.length > 80 && ok(x));
+        if (p) return { text: shortText(p.extract, 1800), title: p.title, desc: p.description || '', lang: l };
+      }
+    }
+  }
+  return null;
+}
+
 // GET /api/club?name=Arsenal&lang=fr
 app.get('/api/club', async (req, res) => {
   try {
@@ -1312,10 +1343,11 @@ app.get('/api/club', async (req, res) => {
     const ALIAS = { psg: ['Paris Saint Germain', 'Paris SG', 'Paris'], 'paris sg': ['Paris Saint-Germain'], om: ['Marseille'], ol: ['Lyon'], inter: ['Inter Milan', 'Internazionale', 'Inter'], 'atl madrid': ['Atletico Madrid'], 'atletico madrid': ['Atletico Madrid'], barca: ['Barcelona'], spurs: ['Tottenham Hotspur'], wolves: ['Wolverhampton Wanderers'], leipzig: ['RB Leipzig'], dortmund: ['Borussia Dortmund'], leverkusen: ['Bayer Leverkusen'], gladbach: ['Borussia Monchengladbach'], betis: ['Real Betis'], sociedad: ['Real Sociedad'], 'club brugge kv': ['Club Brugge'], 'bayern munich': ['Bayern Munich', 'Bayern Munchen'], 'sporting cp': ['Sporting CP'] };
     const base = name.replace(/\bUtd\b/gi, 'United').replace(/\bAtl\.?\b/gi, 'Atletico').replace(/\bSt\.?\s/gi, 'Saint ').replace(/^Man\s+/i, 'Manchester ').replace(/\s+(FC|AFC|CF|SC|KV|SK|FK|BK|AS|AC)$/i, '').replace(/^(FC|AFC|CF|SC|AS|AC|SK|FK)\s+/i, '').trim();
     const terms = [...new Set([name, ...(ALIAS[fold(name).replace(/[^a-z ]/g, '').trim()] || []), ...(ALIAS[fold(base).replace(/[^a-z ]/g, '').trim()] || []), base].filter(Boolean))].slice(0, 5);
-    let t = null;
+    let t = null, tsdbDown = false;
     for (const term of terms) {
-      const j = await tsdbJson('searchteams.php', 't=' + encodeURIComponent(term.replace(/\s+/g, '_')));
-      if (!j || !('teams' in j)) { const e = new Error('limite ' + JSON.stringify(j).slice(0, 120)); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
+      let j = null;
+      try { j = await tsdbJson('searchteams.php', 't=' + encodeURIComponent(term.replace(/\s+/g, '_'))); } catch (e) { if (!e.paused) throw e; }
+      if (!j || !('teams' in j)) { tsdbDown = true; break; }
       const nz = v => fold(v).replace(/[^a-z0-9]/g, '').replace(/^(fc|cf|afc|sc|ac|as)/, '').replace(/(fc|cf|afc|sc)$/, '');
       const wanted = new Set(terms.map(nz).concat([nz(name), nz(base)]));
       const names = x => [x.strTeam, x.strTeamShort, ...String(x.strTeamAlternate || '').split(',')].map(nz).filter(Boolean);
@@ -1331,6 +1363,13 @@ app.get('/api/club', async (req, res) => {
       keywords: t.strKeywords || '', badge: t.strBadge || null, fanart: t.strFanart1 || null,
       text: shortText(pickText(t, lang, 'strDescription'), 1800)
     };
+    // texte d'histoire : Wikipédia (dans la langue de l'app), sinon celui de TheSportsDB
+    const core = fold(base).replace(/[^a-z0-9 ]/g, '').trim();
+    const coreWords = core.split(/\s+/).filter(w => w.length > 2);
+    const wk = await wikiText(lang, [t ? t.strTeam : name, ...terms.filter(x => x !== name && x !== (t && t.strTeam))].slice(0, 3), ['football club', 'club de football'],
+      pg => FOOT_RE.test((pg.extract || '').slice(0, 600) + ' ' + (pg.description || '')) && coreWords.some(w => fold(pg.title).includes(w)) && !/\b(season|saison|temporada|stagione|sezon|women|féminin|femenino)\b/i.test(pg.title));
+    if (wk) { club = club || { name: wk.title, formed: null, stadium: '', location: '', country: '', league: '' }; club.text = wk.text; club.source = 'wikipedia'; }
+    if (tsdbDown && !club) { const e = new Error('limite'); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
     if (!req.query.debug) histSet(key, club, club ? HIST_TTL : HIST_MISS_TTL);
     res.json(req.query.debug ? { club, terms, dbg: req._dbg } : { club });
   } catch (err) {
@@ -1353,10 +1392,11 @@ app.get('/api/player-history', async (req, res) => {
     const wantFull = fold(full || name).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
     const terms = [full || name];
     if (nm && !hasFull && nm.surname !== name) terms.push(nm.surname);
-    let found = null;
+    let found = null, tsdbMiss = false;
     for (const term of terms) {
-      const j = await tsdbJson('searchplayers.php', 'p=' + encodeURIComponent(term.replace(/\s+/g, '_')));
-      if (!j || !('player' in j)) { const e = new Error('limite'); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
+      let j = null;
+      try { j = await tsdbJson('searchplayers.php', 'p=' + encodeURIComponent(term.replace(/\s+/g, '_'))); } catch (e) { if (!e.paused) throw e; }
+      if (!j || !('player' in j)) { tsdbMiss = true; break; }
       const list = arr(j.player).filter(p => /soccer|football/i.test(p.strSport || ''));
       const sameFull = p => wantFull.includes(' ') && fold(p.strPlayer).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim() === wantFull;
       const dup = list.filter(sameFull).length > 1;
@@ -1370,7 +1410,7 @@ app.get('/api/player-history', async (req, res) => {
         const f = await tsdbJson('lookupformerteams.php', 'id=' + encodeURIComponent(found.idPlayer));
         career = arr(f && f.formerteams).map(x => ({ team: x.strFormerTeam, type: x.strMoveType || '', from: x.strJoined || '', to: x.strDeparted || '' }))
           .filter(x => x.team);
-      } catch (e) { if (e.paused) throw e; }
+      } catch (e) { /* carrière indisponible : on garde le reste */ }
       player = {
         name: found.strPlayer, born: found.dateBorn || '', birthplace: found.strBirthLocation || '', nationality: found.strNationality || '',
         height: found.strHeight || '', position: found.strPosition || '', number: found.strNumber || '', signed: found.dateSigned || '',
@@ -1378,6 +1418,13 @@ app.get('/api/player-history', async (req, res) => {
         text: shortText(pickText(found, lang, 'strDescription'), 1500)
       };
     }
+    // biographie : Wikipédia (langue de l'app) ; sert aussi quand TheSportsDB ne connaît pas le joueur
+    const pname = full || name;
+    const pw = fold(pname).replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length > 2);
+    const wk = pw.length ? await wikiText(lang, [pname, ...(full && full !== name ? [name] : [])].slice(0, 2), ['footballer', 'joueur de football'],
+      pg => FOOT_RE.test((pg.extract || '').slice(0, 500) + ' ' + (pg.description || '')) && pw.filter(w => fold(pg.title).includes(w)).length >= Math.min(2, pw.length) && !/\b(season|saison|temporada|stagione|sezon)\b/i.test(pg.title)) : null;
+    if (wk) { player = player || { name: pname, born: '', birthplace: '', nationality: '', height: '', position: '', number: '', signed: '', team, career: [] }; if (wk.text) player.text = wk.text; player.source = 'wikipedia'; }
+    if (!player && tsdbMiss) { const e = new Error('limite'); e.paused = true; throw e; }
     histSet(key, player, player ? HIST_TTL : HIST_MISS_TTL);
     res.json({ player });
   } catch (err) {
