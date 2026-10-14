@@ -841,7 +841,7 @@ async function addFeed(detail, debug) {
     const [slug, id] = String(key).split('~');
     const data = await espnGet(`${ESPN_BASE}/${slug}/summary?event=${encodeURIComponent(id)}`, d => {
       const t = d && d.header && d.header.competitions && d.header.competitions[0] && d.header.competitions[0].status;
-      return (t && t.type && t.type.state === 'post') ? 60 * 60 * 1000 : 30 * 1000;
+      return (t && t.type && t.type.state === 'post') ? 60 * 60 * 1000 : 15 * 1000;
     });
     const hc = arr(data.header && data.header.competitions)[0] || {};
     const comp = side => arr(hc.competitors).find(c => c.homeAway === side) || {};
@@ -901,7 +901,7 @@ async function addInjuries(detail, debug) {
     const [slug, id] = String(key).split('~');
     const data = await espnGet(`${ESPN_BASE}/${slug}/summary?event=${encodeURIComponent(id)}`, d => {
       const t = d && d.header && d.header.competitions && d.header.competitions[0] && d.header.competitions[0].status;
-      return (t && t.type && t.type.state === 'post') ? 60 * 60 * 1000 : 30 * 1000;
+      return (t && t.type && t.type.state === 'post') ? 60 * 60 * 1000 : 15 * 1000;
     });
     const hc = arr(data.header && data.header.competitions)[0] || {};
     const nm = side => { const c = arr(hc.competitors).find(x => x.homeAway === side) || {}; return fold((c.team && (c.team.displayName || c.team.name)) || ''); };
