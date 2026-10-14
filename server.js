@@ -996,6 +996,21 @@ app.get('/api/probable', async (req, res) => {
     if (isAfr(home) || isAfr(away)) return res.json({ probable: null });
     const from = new Date(Date.parse(date + 'T00:00:00Z') - 60 * 86400000).toISOString().slice(0, 10);
     const to = new Date(Date.parse(date + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+    const { lid } = req.query;
+    const squadOf = async id => {   // effectif (blessés compris) : un échec ne bloque pas la composition
+      try {
+        if (!lid || isAfr(lid)) return [];
+        const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(lid)}`, 6 * 60 * 60 * 1000);
+        const t = asList(raw).find(x => String(x.team_key) === String(id));
+        return t ? arr(t.players).map(mapPlayer) : [];
+      } catch (e) { return []; }
+    };
+    const toks = n => fold(n).replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    const findSq = (squad, name) => {
+      const A = toks(name); if (!A.length) return null;
+      const cand = squad.filter(p => [p.name, p.fullName].some(nm => { const B = toks(nm); return B.length && B[B.length - 1] === A[A.length - 1] && (B.length === 1 || A.length === 1 || B[0][0] === A[0][0]); }));
+      return cand.length === 1 ? cand[0] : (cand.find(p => [p.name, p.fullName].some(nm => toks(nm).join(' ') === A.join(' '))) || null);
+    };
     const side = async id => {
       const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=${from}&to=${to}&team_id=${encodeURIComponent(id)}`, 3 * 3600 * 1000);
       const now = new Date();
@@ -1005,21 +1020,43 @@ app.get('/api/probable', async (req, res) => {
         .sort((a, b) => String(b.x.match_date).localeCompare(String(a.x.match_date)) || String(b.x.match_time).localeCompare(String(a.x.match_time)))
         .slice(0, 5);
       if (!list.length) return null;
+      const squad = await squadOf(id);
       const last = list[0], p = y => ({ n: y.lineup_number, name: y.lineup_player, pos: y.lineup_position });
-      const freq = {}; list.forEach(m => m.starters.forEach(y => { freq[y.lineup_player] = (freq[y.lineup_player] || 0) + 1; }));
+      // expulsés au dernier match = suspendus
+      const reds = new Set(arr(last.x.cards).filter(c => /red/i.test(c.card || '') && (last.isHome ? c.home_fault : c.away_fault)).map(c => fold(last.isHome ? c.home_fault : c.away_fault)));
+      const reasonOf = name => {
+        if (reds.has(fold(name))) return 'suspended';
+        const sq = findSq(squad, name); if (sq && sq.injured) return 'injured';
+        return '';
+      };
+      // joueurs vus dans les 5 derniers matchs (titulaires pèsent plus), pour remplacer les absents
+      const pool = new Map();
+      list.forEach(m => { [...m.starters.map(y => [y, 2]), ...arr(m.l.substitutes).map(y => [y, 1])].forEach(([y, w]) => { const k = fold(y.lineup_player); const o = pool.get(k) || { name: y.lineup_player, n: y.lineup_number, score: 0 }; o.score += w; pool.set(k, o); }); });
+      const used = new Set(last.starters.map(y => fold(y.lineup_player)));
+      const absent = [];
+      const starters = last.starters.map(y => {
+        const why = reasonOf(y.lineup_player);
+        if (!why) return p(y);
+        const sq0 = findSq(squad, y.lineup_player), posGroup = sq0 && sq0.position;
+        const best = [...pool.values()].filter(c => !used.has(fold(c.name)) && !reasonOf(c.name) && (!posGroup || (() => { const q = findSq(squad, c.name); return !q || q.position === posGroup; })())).sort((a, b) => b.score - a.score)[0];
+        if (!best) { absent.push({ name: y.lineup_player, reason: why, repl: '' }); return p(y); }
+        used.add(fold(best.name)); absent.push({ name: y.lineup_player, reason: why, repl: best.name });
+        return { n: best.n, name: best.name, pos: y.lineup_position };
+      });
+      const gone = new Set(starters.map(y => fold(y.name)));
       return {
-        starters: last.starters.map(p), subs: arr(last.l.substitutes).map(p),
+        starters, subs: arr(last.l.substitutes).map(p).filter(y => !gone.has(fold(y.name)) && !reasonOf(y.name)),
         coach: arr(last.l.coach).map(c => c.lineup_player).filter(Boolean).join(', '),
         system: last.isHome ? (last.x.match_hometeam_system || '') : (last.x.match_awayteam_system || ''),
         basedOn: { date: last.x.match_date, opponent: last.isHome ? last.x.match_awayteam_name : last.x.match_hometeam_name, n: list.length },
-        regular: last.starters.map(y => freq[y.lineup_player] || 1)
+        absent
       };
     };
     const [h, a] = await Promise.all([side(home), side(away)]);
     if (!h && !a) return res.json({ probable: null });
     const empty = { starters: [], subs: [], coach: '' };
     res.json({ probable: { lineups: { home: h ? { starters: h.starters, subs: h.subs, coach: h.coach } : empty, away: a ? { starters: a.starters, subs: a.subs, coach: a.coach } : empty },
-      homeSystem: h ? h.system : '', awaySystem: a ? a.system : '', basedOn: { home: h && h.basedOn, away: a && a.basedOn } } });
+      homeSystem: h ? h.system : '', awaySystem: a ? a.system : '', basedOn: { home: h && h.basedOn, away: a && a.basedOn }, absent: { home: h ? h.absent : [], away: a ? a.absent : [] } } });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erreur composition probable.', detail: err.message || String(err) });
