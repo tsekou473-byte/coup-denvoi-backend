@@ -934,6 +934,8 @@ app.get('/api/afr-find', async (req, res) => {
   }
 });
 
+require('./chat')(app);
+
 app.get('/api/leagues', (req, res) => {
   res.json(Object.entries(LEAGUES).map(([code, l]) => ({ code, ...l })));
 });
