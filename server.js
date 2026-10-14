@@ -988,6 +988,44 @@ app.get('/api/competitions', async (req, res) => {
 });
 
 // GET /api/standings?league_id=152 (ou afr:12) → classement d'une compétition
+// GET /api/probable?home=<id>&away=<id>&date=2026-10-25 → composition probable : celle des derniers matchs de chaque équipe
+app.get('/api/probable', async (req, res) => {
+  try {
+    const { home, away, date } = req.query;
+    if (!home || !away || !/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return res.status(400).json({ error: 'Paramètres home, away et date requis.' });
+    if (isAfr(home) || isAfr(away)) return res.json({ probable: null });
+    const from = new Date(Date.parse(date + 'T00:00:00Z') - 60 * 86400000).toISOString().slice(0, 10);
+    const to = new Date(Date.parse(date + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+    const side = async id => {
+      const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=${from}&to=${to}&team_id=${encodeURIComponent(id)}`, 3 * 3600 * 1000);
+      const now = new Date();
+      const list = asList(raw).filter(x => (String(x.match_hometeam_id) === String(id) || String(x.match_awayteam_id) === String(id)) && mapGame(x, now).status === 'final')
+        .map(x => { const isHome = String(x.match_hometeam_id) === String(id); const l = (x.lineup || {})[isHome ? 'home' : 'away'] || {}; return { x, isHome, l, starters: arr(l.starting_lineups) }; })
+        .filter(m => m.starters.length >= 10)
+        .sort((a, b) => String(b.x.match_date).localeCompare(String(a.x.match_date)) || String(b.x.match_time).localeCompare(String(a.x.match_time)))
+        .slice(0, 5);
+      if (!list.length) return null;
+      const last = list[0], p = y => ({ n: y.lineup_number, name: y.lineup_player, pos: y.lineup_position });
+      const freq = {}; list.forEach(m => m.starters.forEach(y => { freq[y.lineup_player] = (freq[y.lineup_player] || 0) + 1; }));
+      return {
+        starters: last.starters.map(p), subs: arr(last.l.substitutes).map(p),
+        coach: arr(last.l.coach).map(c => c.lineup_player).filter(Boolean).join(', '),
+        system: last.isHome ? (last.x.match_hometeam_system || '') : (last.x.match_awayteam_system || ''),
+        basedOn: { date: last.x.match_date, opponent: last.isHome ? last.x.match_awayteam_name : last.x.match_hometeam_name, n: list.length },
+        regular: last.starters.map(y => freq[y.lineup_player] || 1)
+      };
+    };
+    const [h, a] = await Promise.all([side(home), side(away)]);
+    if (!h && !a) return res.json({ probable: null });
+    const empty = { starters: [], subs: [], coach: '' };
+    res.json({ probable: { lineups: { home: h ? { starters: h.starters, subs: h.subs, coach: h.coach } : empty, away: a ? { starters: a.starters, subs: a.subs, coach: a.coach } : empty },
+      homeSystem: h ? h.system : '', awaySystem: a ? a.system : '', basedOn: { home: h && h.basedOn, away: a && a.basedOn } } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur composition probable.', detail: err.message || String(err) });
+  }
+});
+
 // GET /api/standings-at?league_id=3&date=2019-03-17 → classement tel qu'il était la veille de cette date (calculé à partir des matchs de la saison)
 app.get('/api/standings-at', async (req, res) => {
   try {
