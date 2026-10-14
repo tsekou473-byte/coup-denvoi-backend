@@ -1001,16 +1001,27 @@ app.get('/api/standings-at', async (req, res) => {
     const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=${start}&to=${end}&league_id=${encodeURIComponent(league_id)}`, 30 * 24 * 3600 * 1000);
     if (req.query.debug) { const c = {}; asList(raw).forEach(x => { const k = (x.match_round || '') + ' | ' + (x.stage_name || ''); c[k] = (c[k] || 0) + 1; }); return res.json({ n: asList(raw).length, rounds: c, keys: Object.keys(asList(raw)[0] || {}) }); }
     const now = new Date();
-    const games = asList(raw).map(x => mapGame(x, now)).filter(g => g.status === 'final' && g.hs != null && g.as != null && g.date < date && !/play-?off|final|round of|1\/|knockout|qualif/i.test(String((asList(raw).find(x => String(x.match_id) === String(g.id)) || {}).match_round || '')));
+    const KO = /qualif|prelim|play-?off|final|round of|1\/|knockout|8th|16th|32nd|eliminat/i;
+    const items = asList(raw).filter(x => !KO.test(String(x.match_round || '')));
+    const stageNames = new Set(items.map(x => String(x.stage_name || '')));
+    const multi = stageNames.size > 1;
     const T = new Map();
-    const row = (id, name, badge) => { const k = id || name; if (!T.has(k)) T.set(k, { teamId: id, team: name, badge: badge || null, played: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0, zone: '', stage: '' }); return T.get(k); };
-    for (const g of games) {
-      const h = row(g.homeId, g.home, g.homeLogo), a = row(g.awayId, g.away, g.awayLogo);
+    const row = (stage, id, name, badge) => { const k = stage + '|' + (id || name); if (!T.has(k)) T.set(k, { teamId: id, team: name, badge: badge || null, played: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0, zone: '', stage }); return T.get(k); };
+    for (const x of items) {
+      const g = mapGame(x, now);
+      if (!(g.status === 'final' && g.hs != null && g.as != null && g.date < date)) continue;
+      const st = multi ? String(x.stage_name || '') : '';
+      const h = row(st, g.homeId, g.home, g.homeLogo), a = row(st, g.awayId, g.away, g.awayLogo);
       const hs = +g.hs, as = +g.as;
       h.played++; a.played++; h.gf += hs; h.ga += as; a.gf += as; a.ga += hs;
       if (hs > as) { h.w++; a.l++; h.pts += 3; } else if (hs < as) { a.w++; h.l++; a.pts += 3; } else { h.d++; a.d++; h.pts++; a.pts++; }
     }
-    const rows = [...T.values()].sort((x, y2) => y2.pts - x.pts || (y2.gf - y2.ga) - (x.gf - x.ga) || y2.gf - x.gf || String(x.team).localeCompare(String(y2.team))).map((r, i) => ({ ...r, pos: i + 1 }));
+    const byStage = {};
+    [...T.values()].forEach(r => { (byStage[r.stage] = byStage[r.stage] || []).push(r); });
+    const rows = [];
+    Object.keys(byStage).sort().forEach(k => {
+      byStage[k].sort((x, y2) => y2.pts - x.pts || (y2.gf - y2.ga) - (x.gf - x.ga) || y2.gf - x.gf || String(x.team).localeCompare(String(y2.team))).forEach((r, i) => rows.push({ ...r, pos: i + 1 }));
+    });
     res.json({ rows, count: rows.length, asOf: end });
   } catch (err) {
     console.error(err);
