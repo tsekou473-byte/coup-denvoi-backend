@@ -1221,6 +1221,7 @@ app.get('/api/match', async (req, res) => {
     const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?${params.toString()}`, fixturesTtl(day, day));
     const item = asList(raw).find(x => String(x.match_id) === String(id));
     if (!item) return res.status(404).json({ error: 'Match introuvable.', detail: 'Aucun match avec cet identifiant à cette date.' });
+    if (req.query.rawitem) return res.json({ lineupSample: ((item.lineup || {}).home || {}), keys: Object.keys(item), stat: arr(item.statistics).slice(0, 3) });
     res.json(await enrichFromEspn(mapDetail(item)));
   } catch (err) {
     console.error(err);
