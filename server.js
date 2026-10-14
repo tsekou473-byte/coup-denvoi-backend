@@ -1284,6 +1284,17 @@ app.get('/api/standings', async (req, res) => {
       if (err.status !== 404) throw err;
     }
     const rows = list.filter(x => x && x.team_name).map(mapStanding);
+    // forme : 5 derniers résultats de chaque équipe, calculés à partir des matchs de la saison (non bloquant)
+    try {
+      const now = new Date(), y = now.getUTCFullYear(), mo = now.getUTCMonth() + 1;
+      const start = (mo >= 7 ? y : y - 1) + '-07-01', end = dayIso(0);
+      const rawF = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=${start}&to=${end}&league_id=${encodeURIComponent(league_id)}`, 30 * 60 * 1000);
+      const fin = asList(rawF).map(x => mapGame(x, now)).filter(g => g.status === 'final' && g.hs != null && g.as != null).sort((a, b) => String(a.date + (a.time || '')).localeCompare(String(b.date + (b.time || ''))));
+      const F = new Map();
+      const push = (id, r) => { if (!id) return; const a = F.get(id) || []; a.push(r); F.set(id, a); };
+      fin.forEach(g => { const h = +g.hs, a = +g.as; push(String(g.homeId), h > a ? 'w' : h < a ? 'l' : 'd'); push(String(g.awayId), h < a ? 'w' : h > a ? 'l' : 'd'); });
+      rows.forEach(r => { const f = F.get(String(r.teamId)); if (f && f.length) r.form = f.slice(-5); });
+    } catch (e) { console.warn('Forme :', e.message); }
     const out = { rows, count: rows.length };
     if (!rows.length) { out.note = 'Aucun classement renvoyé par le fournisseur pour cette compétition.'; out.sampleKeys = list[0] ? Object.keys(list[0]).slice(0, 30) : []; }
     res.json(out);
