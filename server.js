@@ -1907,13 +1907,26 @@ async function dayOdds(day) {
     const o1 = parseFloat(x.odd_1), ox = parseFloat(x.odd_x), o2 = parseFloat(x.odd_2);
     if (!x.match_id || ![o1, ox, o2].every(v => isFinite(v) && v > 1)) continue;
     const i1 = 1 / o1, ix = 1 / ox, i2 = 1 / o2, t = i1 + ix + i2;
-    const a = acc[String(x.match_id)] || (acc[String(x.match_id)] = { h: 0, d: 0, a: 0, n: 0 });
-    a.h += i1 / t; a.d += ix / t; a.a += i2 / t; a.n++;
+    const a = acc[String(x.match_id)] || (acc[String(x.match_id)] = { h: 0, d: 0, a: 0, n: 0, o1: 0, ox: 0, o2: 0 });
+    a.h += i1 / t; a.d += ix / t; a.a += i2 / t; a.o1 += o1; a.ox += ox; a.o2 += o2; a.n++;
   }
   const out = {};
-  for (const [id, a] of Object.entries(acc)) out[id] = { h: 100 * a.h / a.n, d: 100 * a.d / a.n, a: 100 * a.a / a.n };
+  for (const [id, a] of Object.entries(acc)) out[id] = { h: 100 * a.h / a.n, d: 100 * a.d / a.n, a: 100 * a.a / a.n, o1: a.o1 / a.n, ox: a.ox / a.n, o2: a.o2 / a.n, n: a.n };
   return out;
 }
+// GET /api/odds?match=ID&date=AAAA-MM-JJ -> { o1, ox, o2, n } (moyenne des bookmakers) ou { o1:null }
+app.get('/api/odds', async (req, res) => {
+  const { match, date } = req.query;
+  if (!match || !/^\d{4}-\d{2}-\d{2}$/.test(date || '') || isAfr(String(match))) return res.json({ o1: null });
+  try {
+    const o = (await dayOdds(date))[String(match)];
+    if (!o) return res.json({ o1: null });
+    const r2 = v => Math.round(v * 100) / 100;
+    res.json({ o1: r2(o.o1), ox: r2(o.ox), o2: r2(o.o2), n: o.n });
+  } catch (e) {
+    res.json(req.query.debug ? { o1: null, err: e.message } : { o1: null });
+  }
+});
 const modelStand = new Map();   // league_id -> { rows, at }
 async function standingsForModel(leagueId) {
   const hit = modelStand.get(leagueId);
