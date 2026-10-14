@@ -831,6 +831,66 @@ async function addVar(detail, debug) {
   } catch (e) { console.warn('VAR :', e.message); return null; }
 }
 
+
+/* ---------- FIL « EN DIRECT » (corners, tirs, fautes, cartons, VAR…) pendant le match ---------- */
+async function addFeed(detail, debug) {
+  try {
+    if ((detail.status !== 'live' && !debug) || typeof detail.ts !== 'number') return null;
+    const key = await espnFindKey(detail);
+    if (!key) return debug ? { key: null } : null;
+    const [slug, id] = String(key).split('~');
+    const data = await espnGet(`${ESPN_BASE}/${slug}/summary?event=${encodeURIComponent(id)}`, d => {
+      const t = d && d.header && d.header.competitions && d.header.competitions[0] && d.header.competitions[0].status;
+      return (t && t.type && t.type.state === 'post') ? 60 * 60 * 1000 : 30 * 1000;
+    });
+    const hc = arr(data.header && data.header.competitions)[0] || {};
+    const comp = side => arr(hc.competitors).find(c => c.homeAway === side) || {};
+    const nm = c => fold((c.team && (c.team.displayName || c.team.name)) || '');
+    const hn = nm(comp('home')), an = nm(comp('away'));
+    const sideOf = (text, playTeam) => {
+      const t = fold(playTeam || '');
+      if (t && hn && (t === hn || hn.includes(t) || t.includes(hn))) return 'home';
+      if (t && an && (t === an || an.includes(t) || t.includes(an))) return 'away';
+      const x = fold(text), inH = hn && x.includes(hn), inA = an && x.includes(an);
+      return inH && !inA ? 'home' : (inA && !inH ? 'away' : '');
+    };
+    const out = [];
+    const VARRE = /\bVAR\b|video assistant|disallow|ruled out|overturn|goal (was )?cancel|no goal|chalked/i;
+    for (const c of arr(data.commentary)) {
+      const text = String(c.text || '').replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      const ptype = String((c.play && c.play.type && c.play.type.text) || '');
+      const probe = ptype + ' | ' + text;
+      let kind = null;
+      if (VARRE.test(text)) kind = /disallow|ruled out|no goal|goal (was )?cancel|chalked|overturn/i.test(text) && /goal/i.test(text) ? 'var_goal' : (/penalt/i.test(text) && /(cancel|overturn|no penalty|rescind|withdraw)/i.test(text) ? 'var_pen' : 'var');
+      else if (/^goal[!\s,.]|\bgoal!|own goal|^penalty (scored|converted)/i.test(text) || /^goal$/i.test(ptype)) kind = 'goal';
+      else if (/penalty (awarded|conceded|saved|missed)|awarded a penalty/i.test(probe)) kind = 'penalty';
+      else if (/^corner\b|corner kick|\bcorner,/i.test(text) || /corner/i.test(ptype)) kind = 'corner';
+      else if (/second yellow|red card|sent off|straight red/i.test(probe)) kind = 'red';
+      else if (/yellow card|booked/i.test(probe)) kind = 'yellow';
+      else if (/^substitution|substitution,|replaces/i.test(text) || /substitution/i.test(ptype)) kind = 'sub';
+      else if (/offside/i.test(probe)) kind = 'offside';
+      else if (/attempt saved|shot on target|saved by|\bsaved\b/i.test(probe) && !/foul|offside/i.test(text.slice(0, 12))) kind = 'shot_on';
+      else if (/attempt blocked|blocked/i.test(probe) && /attempt|shot/i.test(probe)) kind = 'shot_block';
+      else if (/attempt missed|misses|off target|too high|goes wide|wide of|over the bar|close range|hits the (bar|post|woodwork)|shot off target/i.test(probe)) kind = 'shot_off';
+      else if (/^foul\b|foul by|fouled|commits a foul/i.test(probe)) kind = 'foul';
+      else if (/free kick/i.test(text.slice(0, 20))) kind = 'freekick';
+      else if (/^(first|second) half begins|match begins|kick.?off/i.test(text)) kind = 'kickoff';
+      else if (/^first half ends|half.?time|^second half ends|^match ends|full.?time|extra time/i.test(text.slice(0, 40))) kind = /half.?time|first half ends/i.test(text.slice(0, 40)) ? 'ht' : 'ft';
+      if (!kind) continue;
+      const time = cleanClock(c.time && c.time.displayValue);
+      const part = arr(c.play && c.play.participants)[0];
+      const player = part && part.athlete ? (part.athlete.displayName || part.athlete.shortName || '') : '';
+      const ptm = c.play && c.play.team ? (c.play.team.displayName || c.play.team.name || '') : '';
+      out.push({ time, kind, team: sideOf(text, ptm), player: player || '', seq: Number(c.sequence) || out.length });
+    }
+    out.sort((a, b) => b.seq - a.seq);
+    const res = out.slice(0, 60).map(({ seq, ...x }) => x);
+    if (debug) return { key, n: out.length, items: res.slice(0, 15), sample: arr(data.commentary).slice(-6), names: [hn, an] };
+    return res.length ? res : null;
+  } catch (e) { console.warn('Fil direct :', e.message); return null; }
+}
+
 async function enrichFromEspn(detail) {
   try {
     const noLu = !(detail.lineups.home.starters.length || detail.lineups.away.starters.length);
@@ -1270,6 +1330,9 @@ app.get('/api/match', async (req, res) => {
     if (req.query.vardbg) return res.json(await addVar(det, true));
     const vr = await addVar(det);
     if (vr) det.varEvents = vr;
+    if (req.query.feeddbg) return res.json(await addFeed(det, true));
+    const fd = await addFeed(det);
+    if (fd) det.feed = fd;
     res.json(det);
   } catch (err) {
     console.error(err);
