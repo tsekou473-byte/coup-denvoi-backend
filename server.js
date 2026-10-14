@@ -1671,6 +1671,21 @@ app.get('/api/h2h', async (req, res) => {
         })).filter(g => g.hs != null && g.as != null);
         out = summarizeH2H(games, a); source = 'p1';
       } catch (e) { console.log('h2h p1', e.message); dbg.push('p1: ' + e.message); }
+      // historique plus ancien : tous les matchs de l'équipe A depuis 2005 chez le fournisseur 1, filtrés sur l'équipe B
+      if (out.matches.length < 6) {
+        try {
+          const today = new Date().toISOString().slice(0, 10);
+          const rawA = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=2005-01-01&to=${today}&team_id=${encodeURIComponent(a)}`, 7 * 24 * 3600 * 1000);
+          const listA = asList(rawA).filter(x => [String(x.match_hometeam_id), String(x.match_awayteam_id)].includes(String(b)));
+          const g2 = listA.map(x => ({ date: x.match_date, homeId: String(x.match_hometeam_id || ''), awayId: String(x.match_awayteam_id || ''),
+            home: x.match_hometeam_name, away: x.match_awayteam_name, hs: toNum(x.match_hometeam_score), as: toNum(x.match_awayteam_score), league: x.league_name || '' }))
+            .filter(g => g.hs != null && g.as != null && /^(FT|AET|Finished|After|Pen)/i.test(String(listA.find(y => y.match_id && String(y.match_date) === g.date) && listA.find(y => String(y.match_date) === g.date).match_status || 'FT')) || true);
+          dbg.push('hist: total ' + asList(rawA).length + ', contre B ' + listA.length);
+          const seen = new Set(out.matches.map(m => m.date + '|' + m.homeId));
+          const all = out.matches.concat(g2.filter(g => !seen.has(g.date + '|' + g.homeId)));
+          if (all.length > out.matches.length) { out = summarizeH2H(all, a); source = 'p1-hist'; }
+        } catch (e) { console.log('h2h hist', e.message); dbg.push('hist: ' + e.message); }
+      }
       if (out.matches.length < 6 && an && bn && APISPORTS_KEY) {
         try {
           const o2 = await sportsH2H(an, bn);
