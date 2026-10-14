@@ -1331,7 +1331,7 @@ async function wikiText(lang, terms, suffixes, ok) {
 }
 
 
-const WIKI_BAD = new Set(['campus','stade','stadium','academy','academie','women','feminin','femenino','feminine','ultras','supporters','derby','histoire','history','saison','season','centre','center','formation','youth','reserves','reserve','ii','iii','u19','u21','u23','b','ladies','basketball','handball','rugby','volleyball','hockey','futsal','esports']);
+const WIKI_BAD = new Set(['campus','stade','stadium','academy','academie','women','feminin','femeni','femenino','femminile','feminino','frauen','kadin','feminine','ultras','supporters','derby','histoire','history','saison','season','centre','center','formation','youth','reserves','reserve','ii','iii','u19','u21','u23','b','ladies','basketball','handball','rugby','volleyball','hockey','futsal','esports']);
 const WIKI_STOP = new Set(['football','club','fc','cf','afc','sc','ac','as','de','du','la','le','the','of','and','et','y','e','sporting']);
 function wikiToks(x, drop) { return fold(String(x || '').replace(/\(.*?\)/g, ' ')).replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w && !(drop && drop.has(w))); }
 // la page est-elle bien celle du club « term » ? (et pas son centre de formation, son stade, sa section féminine…)
