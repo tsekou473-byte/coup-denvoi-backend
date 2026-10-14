@@ -811,7 +811,17 @@ async function addVar(detail, debug) {
       const k = cleanClock(time) + '|' + text.slice(0, 40); if (seen.has(k)) return; seen.add(k);
       const goal = /disallow|ruled out|no goal|goal (was )?cancel|chalked|overturn.*goal|goal.*overturn|goal.*(not|won't) (stand|count)/i.test(text);
       const pen = /penalt/i.test(text) && /(cancel|overturn|no penalty|rescind|withdraw)/i.test(text);
-      list.push({ time: cleanClock(time), team: e && e.team && String(e.team.id) ? (String(e.team.id) === homeId ? 'home' : 'away') : '', kind: goal ? 'goal' : pen ? 'penalty' : 'review', text: text.slice(0, 220) });
+      const kind = goal ? 'goal' : pen ? 'penalty' : 'review';
+      const tm = cleanClock(time), tn = parseInt(tm, 10) || 0;
+      const pm = text.match(/(?:OVERTURNED BY VAR|VAR(?: Decision)?)\s*[:\-]?\s*([^()]+?)\s*\(([^)]+)\)/i);
+      const player = pm ? pm[1].trim() : '';
+      let team = '';
+      const inT = n => n && fold(text).includes(fold(n));
+      if (pm && inT(pm[2]) ) team = fold(pm[2]).includes(fold(detail.home).slice(0, 5)) ? 'home' : (fold(pm[2]).includes(fold(detail.away).slice(0, 5)) ? 'away' : '');
+      if (!team) team = inT(detail.home) && !inT(detail.away) ? 'home' : (inT(detail.away) && !inT(detail.home) ? 'away' : '');
+      const dup = list.find(x => x.kind === kind && Math.abs((parseInt(x.time, 10) || 0) - tn) <= 3);   // même décision racontée deux fois
+      if (dup) { if (!dup.player && player) Object.assign(dup, { player, team: team || dup.team, time: tm, text: text.slice(0, 220) }); return; }
+      list.push({ time: tm, team, kind, player, text: text.slice(0, 220) });
     };
     arr(data.keyEvents).forEach(e => push(e.clock && e.clock.displayValue, (e.type && e.type.text ? e.type.text + ': ' : '') + (e.text || e.shortText || ''), e));
     arr(data.commentary).forEach(c => push(c.time && c.time.displayValue, c.text, c.play));
