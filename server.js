@@ -788,6 +788,39 @@ async function espnFindKey(g) {
   espnFound.set(g.id, { at: Date.now(), key });
   return key;
 }
+
+// Décisions de la VAR (buts refusés, penaltys annulés…) via ESPN : texte des événements clés et du commentaire
+async function addVar(detail, debug) {
+  try {
+    if (!(detail.status === 'live' || detail.status === 'final') || typeof detail.ts !== 'number') return null;
+    const key = await espnFindKey(detail);
+    if (!key) return debug ? { key: null } : null;
+    const [slug, id] = String(key).split('~');
+    const data = await espnGet(`${ESPN_BASE}/${slug}/summary?event=${encodeURIComponent(id)}`, d => {
+      const t = d && d.header && d.header.competitions && d.header.competitions[0] && d.header.competitions[0].status;
+      return (t && t.type && t.type.state === 'post') ? 60 * 60 * 1000 : 60 * 1000;
+    });
+    const hc = arr(data.header && data.header.competitions)[0] || {};
+    const homeC = arr(hc.competitors).find(c => c.homeAway === 'home');
+    const homeId = String(homeC && (homeC.team && homeC.team.id || homeC.id));
+    const RE = /\bVAR\b|video assistant|disallow|ruled out|overturn|goal (was )?cancel|no goal|chalked|annul|refus/i;
+    const seen = new Set(), list = [];
+    const push = (time, text, e) => {
+      text = String(text || '').replace(/\s+/g, ' ').trim();
+      if (!text || !RE.test(text)) return;
+      const k = cleanClock(time) + '|' + text.slice(0, 40); if (seen.has(k)) return; seen.add(k);
+      const goal = /disallow|ruled out|no goal|goal (was )?cancel|chalked|overturn.*goal|goal.*overturn|goal.*(not|won't) (stand|count)/i.test(text);
+      const pen = /penalt/i.test(text) && /(cancel|overturn|no penalty|rescind|withdraw)/i.test(text);
+      list.push({ time: cleanClock(time), team: e && e.team && String(e.team.id) ? (String(e.team.id) === homeId ? 'home' : 'away') : '', kind: goal ? 'goal' : pen ? 'penalty' : 'review', text: text.slice(0, 220) });
+    };
+    arr(data.keyEvents).forEach(e => push(e.clock && e.clock.displayValue, (e.type && e.type.text ? e.type.text + ': ' : '') + (e.text || e.shortText || ''), e));
+    arr(data.commentary).forEach(c => push(c.time && c.time.displayValue, c.text, c.play));
+    list.sort((a, b) => (parseInt(a.time, 10) || 0) - (parseInt(b.time, 10) || 0));
+    if (debug) return { key, n: list.length, list, types: [...new Set(arr(data.keyEvents).map(e => e.type && e.type.text))], nc: arr(data.commentary).length };
+    return list.length ? list : null;
+  } catch (e) { console.warn('VAR :', e.message); return null; }
+}
+
 async function enrichFromEspn(detail) {
   try {
     const noLu = !(detail.lineups.home.starters.length || detail.lineups.away.starters.length);
@@ -1221,8 +1254,11 @@ app.get('/api/match', async (req, res) => {
     const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?${params.toString()}`, fixturesTtl(day, day));
     const item = asList(raw).find(x => String(x.match_id) === String(id));
     if (!item) return res.status(404).json({ error: 'Match introuvable.', detail: 'Aucun match avec cet identifiant à cette date.' });
-    if (req.query.rawitem) return res.json({ lineupSample: ((item.lineup || {}).home || {}), keys: Object.keys(item), stat: arr(item.statistics).slice(0, 3) });
-    res.json(await enrichFromEspn(mapDetail(item)));
+    const det = await enrichFromEspn(mapDetail(item));
+    if (req.query.vardbg) return res.json(await addVar(det, true));
+    const vr = await addVar(det);
+    if (vr) det.varEvents = vr;
+    res.json(det);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erreur lors de la récupération du match.', detail: err.message || String(err) });
