@@ -1036,16 +1036,12 @@ app.get('/api/probable', async (req, res) => {
       const absent = [];
       const starters = last.starters.map(y => {
         const why = reasonOf(y.lineup_player);
-        if (!why) return p(y);
-        const sq0 = findSq(squad, y.lineup_player), posGroup = sq0 && sq0.position;
-        const best = [...pool.values()].filter(c => !used.has(fold(c.name)) && !reasonOf(c.name) && (!posGroup || (() => { const q = findSq(squad, c.name); return !q || q.position === posGroup; })())).sort((a, b) => b.score - a.score)[0];
-        if (!best) { absent.push({ name: y.lineup_player, reason: why, repl: '' }); return p(y); }
-        used.add(fold(best.name)); absent.push({ name: y.lineup_player, reason: why, repl: best.name });
-        return { n: best.n, name: best.name, pos: y.lineup_position };
+        if (why) absent.push({ name: y.lineup_name || y.lineup_player, reason: why, repl: '' });
+        return p(y);
       });
-      const gone = new Set(starters.map(y => fold(y.name)));
+      const gone = new Set();
       return {
-        starters, subs: arr(last.l.substitutes).map(p).filter(y => !gone.has(fold(y.name)) && !reasonOf(y.name)),
+        starters, subs: arr(last.l.substitutes).map(p),
         coach: arr(last.l.coach).map(c => c.lineup_player).filter(Boolean).join(', '),
         system: last.isHome ? (last.x.match_hometeam_system || '') : (last.x.match_awayteam_system || ''),
         basedOn: { date: last.x.match_date, opponent: last.isHome ? last.x.match_awayteam_name : last.x.match_hometeam_name, n: list.length },
