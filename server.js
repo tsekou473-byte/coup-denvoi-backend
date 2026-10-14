@@ -1513,6 +1513,44 @@ function wikiTitleIsClub(title, terms) {
 }
 
 // GET /api/club?name=Arsenal&lang=fr
+// GET /api/logo?name=<équipe> -> { logo: url|null } : écusson trouvé par nom (quand le fournisseur de matchs n'en donne pas)
+app.get('/api/logo', async (req, res) => {
+  try {
+    const name = String(req.query.name || '').trim().slice(0, 80);
+    if (!name) return res.json({ logo: null });
+    const key = 'logo|' + fold(name);
+    const hit = histGet(key);
+    if (hit) return res.json({ logo: hit.v });
+    const base = name.replace(/\bUtd\b/gi, 'United').replace(/^Man\s+/i, 'Manchester ').replace(/\s+(FC|AFC|CF|SC|KV|SK|FK|BK|AC|AS)$/i, '').replace(/^(FC|AFC|CF|SC|AC|AS)\s+/i, '').trim();
+    const terms = [...new Set([name, base].filter(Boolean))].slice(0, 2);
+    const nz = v => fold(v).replace(/[^a-z0-9]/g, '').replace(/^(fc|cf|afc|sc|ac|as)/, '').replace(/(fc|cf|afc|sc)$/, '');
+    const words = fold(base).split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !/^(fc|afc|cf|sc|the)$/.test(w));
+    let found = null, down = false;
+    for (const term of terms) {
+      let j = null;
+      try { j = await tsdbJson('searchteams.php', 't=' + encodeURIComponent(term.replace(/\s+/g, '_'))); } catch (e) { if (!e.paused) throw e; }
+      if (!j || !('teams' in j)) { down = true; break; }
+      const cands = arr(j.teams).filter(x => /soccer|football/i.test(x.strSport || '') && x.strBadge);
+      const names = x => [x.strTeam, x.strTeamShort, ...String(x.strTeamAlternate || '').split(',')].map(nz).filter(Boolean);
+      const wanted = new Set([nz(name), nz(base)].filter(Boolean));
+      found = cands.find(x => names(x).some(n => wanted.has(n)));
+      // plus souple : tous les mots du nom se retrouvent dans un seul candidat (ex. « Jeonbuk Motors » = « Jeonbuk Hyundai Motors »)
+      if (!found && words.length >= 2) {
+        const m = cands.filter(x => { const t = fold(x.strTeam || ''); return words.every(w => t.includes(w)); });
+        if (m.length === 1) found = m[0];
+      }
+      if (found) break;
+    }
+    if (down && !found) return res.json({ logo: null, paused: true });
+    const logo = found ? found.strBadge : null;
+    histSet(key, logo, logo ? HIST_TTL : HIST_MISS_TTL);
+    res.json({ logo });
+  } catch (err) {
+    if (err.paused) return res.json({ logo: null, paused: true });
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 app.get('/api/club', async (req, res) => {
   try {
     const name = String(req.query.name || '').slice(0, 80).trim();
@@ -1890,7 +1928,7 @@ app.get('/api/predictions', async (req, res) => {
 });
 
 /* ---------- PROBABILITÉS DE VICTOIRE POUR TOUS LES MATCHS ---------- */
-// 1) pronostic du fournisseur  2) cotes du marché (moyenne des bookmakers)  3) modèle maison (classement + buts marqués/encaissés)
+// 1) pronostic du fournisseur  2) modèle maison (classement + buts marqués/encaissés)
 async function dayPredictions(day) {
   const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_predictions&from=${day}&to=${day}`, 60 * 60 * 1000);
   const out = {};
@@ -1900,34 +1938,6 @@ async function dayPredictions(day) {
   }
   return out;
 }
-async function dayOdds(day) {
-  const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_odds&from=${day}&to=${day}`, 30 * 60 * 1000);
-  const acc = {};
-  for (const x of asList(raw)) {
-    const o1 = parseFloat(x.odd_1), ox = parseFloat(x.odd_x), o2 = parseFloat(x.odd_2);
-    if (!x.match_id || ![o1, ox, o2].every(v => isFinite(v) && v > 1)) continue;
-    const i1 = 1 / o1, ix = 1 / ox, i2 = 1 / o2, t = i1 + ix + i2;
-    const a = acc[String(x.match_id)] || (acc[String(x.match_id)] = { h: 0, d: 0, a: 0, n: 0, o1: 0, ox: 0, o2: 0 });
-    a.h += i1 / t; a.d += ix / t; a.a += i2 / t; a.o1 += o1; a.ox += ox; a.o2 += o2; a.n++;
-  }
-  const out = {};
-  for (const [id, a] of Object.entries(acc)) out[id] = { h: 100 * a.h / a.n, d: 100 * a.d / a.n, a: 100 * a.a / a.n, o1: a.o1 / a.n, ox: a.ox / a.n, o2: a.o2 / a.n, n: a.n };
-  return out;
-}
-// GET /api/odds?match=ID&date=AAAA-MM-JJ -> { o1, ox, o2, n } (moyenne des bookmakers) ou { o1:null }
-app.get('/api/odds', async (req, res) => {
-  const { match, date } = req.query;
-  if (!match || !/^\d{4}-\d{2}-\d{2}$/.test(date || '') || isAfr(String(match))) return res.json({ o1: null });
-  try {
-    const all = await dayOdds(date);
-    const o = all[String(match)];
-    if (!o) return res.json(req.query.debug ? { o1: null, matchesWithOdds: Object.keys(all).length, sampleIds: Object.keys(all).slice(0, 5) } : { o1: null });
-    const r2 = v => Math.round(v * 100) / 100;
-    res.json({ o1: r2(o.o1), ox: r2(o.ox), o2: r2(o.o2), n: o.n });
-  } catch (e) {
-    res.json(req.query.debug ? { o1: null, err: e.message } : { o1: null });
-  }
-});
 const modelStand = new Map();   // league_id -> { rows, at }
 async function standingsForModel(leagueId) {
   const hit = modelStand.get(leagueId);
@@ -1967,7 +1977,6 @@ app.get('/api/winprob', async (req, res) => {
   const done = (p, source) => res.json({ h: Math.round(p.h * 10) / 10, d: Math.round(p.d * 10) / 10, a: Math.round(p.a * 10) / 10, source });
   const errs = [];
   try { const p = (await dayPredictions(date))[String(match)]; if (p) return done(p, 'provider'); } catch (e) { errs.push('pred: ' + e.message); }
-  try { const p = (await dayOdds(date))[String(match)]; if (p) return done(p, 'odds'); } catch (e) { errs.push('odds: ' + e.message); }
   try {
     if (league && home && away && !isAfr(String(league))) {
       const p = poissonModel(await standingsForModel(String(league)), home, away);
