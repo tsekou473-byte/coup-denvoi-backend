@@ -124,4 +124,42 @@ module.exports = function mountChat(app) {
 <h2>Derniers messages</h2><table>${recent.map(row).join('') || '<tr><td>Aucun message</td></tr>'}</table>
 <h2>Utilisateurs bloqués (${db.banned.length})</h2><p>${db.banned.map(h => `${h} <a href="/admin/chat/act?key=${k}&act=unban&uh=${h}">débloquer</a>`).join('<br>') || 'Aucun'}</p>`);
   });
+
+  // ---- signalements d'erreurs envoyés depuis les Réglages de l'app ----
+  const FB_FILE = path.join(DIR, 'feedback.json');
+  let fb = { nextId: 1, items: [] };
+  try { fb = Object.assign(fb, JSON.parse(fs.readFileSync(FB_FILE, 'utf8'))); } catch (e) { /* premier démarrage */ }
+  const saveFb = () => { try { fs.mkdirSync(DIR, { recursive: true }); fs.writeFileSync(FB_FILE, JSON.stringify(fb)); } catch (e) { /* mémoire seulement */ } };
+  const fbRate = new Map();
+  app.post('/api/feedback', (req, res) => {
+    const b = req.body || {};
+    const text = String(b.text || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f<>]/g, ' ').trim().slice(0, 600);
+    if (text.length < 5) return res.status(400).json({ error: 'message trop court' });
+    const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+    const h = (fbRate.get(ip) || []).filter(t => Date.now() - t < 3600 * 1000);
+    if (h.length >= 6) return res.status(429).json({ error: 'Trop de messages, réessaie plus tard.' });
+    h.push(Date.now()); fbRate.set(ip, h);
+    fb.items.push({ id: fb.nextId++, ts: Date.now(), text, version: clean(b.version, 12), lang: clean(b.lang, 8), page: clean(b.page, 20), match: clean(b.match, 40), ua: clean(b.ua, 140), uh: okUid(b.uid) ? uh(b.uid) : '', done: false });
+    if (fb.items.length > 500) fb.items = fb.items.slice(-500);
+    saveFb();
+    console.log('📝 Signalement d\'erreur reçu : ' + text.slice(0, 100));
+    res.json({ ok: true });
+  });
+  app.get('/admin/feedback/act', (req, res) => {
+    if (!guard(req, res)) return;
+    const id = parseInt(req.query.id, 10), it = fb.items.find(x => x.id === id);
+    if (it && req.query.act === 'done') it.done = !it.done;
+    if (it && req.query.act === 'delete') fb.items = fb.items.filter(x => x.id !== id);
+    saveFb();
+    res.redirect('/admin/feedback?key=' + encodeURIComponent(ADMIN_KEY));
+  });
+  app.get('/admin/feedback', (req, res) => {
+    if (!guard(req, res)) return;
+    const k = encodeURIComponent(ADMIN_KEY);
+    const list = fb.items.slice().sort((a, b) => (a.done - b.done) || (b.ts - a.ts));
+    const row = x => `<tr class="${x.done ? 'del' : ''}"><td><b>#${x.id}</b><br><small>${new Date(x.ts).toLocaleString('fr-FR')}</small></td><td>${esc(x.text)}<br><small>${esc(x.version)} · ${esc(x.lang)} · page : ${esc(x.page) || '-'}${x.match ? ' · match : ' + esc(x.match) : ''}<br>${esc(x.ua)}</small></td><td><a href="/admin/feedback/act?key=${k}&act=done&id=${x.id}">${x.done ? 'Rouvrir' : 'Traité'}</a> · <a href="/admin/feedback/act?key=${k}&act=delete&id=${x.id}" onclick="return confirm('Supprimer ?')">Supprimer</a></td></tr>`;
+    res.send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Signalements</title>
+<style>body{font:15px system-ui;margin:16px;max-width:900px}table{border-collapse:collapse;width:100%}td{border-top:1px solid #ddd;padding:8px;vertical-align:top}tr.del{opacity:.5}a{color:#0a58c2}small{color:#666}</style>
+<h1>Signalements d'erreurs (${fb.items.filter(x => !x.done).length} à traiter)</h1><p><a href="/admin/chat?key=${k}">Modération du chat</a></p><table>${list.map(row).join('') || '<tr><td>Aucun signalement</td></tr>'}</table>`);
+  });
 };
