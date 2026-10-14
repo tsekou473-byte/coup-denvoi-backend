@@ -1306,7 +1306,7 @@ const WIKI_LANGS = ['fr', 'en', 'es', 'pt', 'ar', 'de', 'it', 'tr'];
 const FOOT_RE = /football|soccer|fútbol|futebol|calcio|fußball|fussball|futbol|كرة القدم|كرة قدم/i;
 async function wikiSearch(lang, query, limit) {
   const url = `https://${lang}.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=${limit || 4}` +
-    `&prop=extracts|description&exintro=1&explaintext=1&exchars=1800&redirects=1&format=json&formatversion=2`;
+    `&prop=extracts|description&exintro=1&explaintext=1&exchars=2600&redirects=1&format=json&formatversion=2`;
   const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 8000);
   try {
     const r = await fetch(url, { headers: { 'User-Agent': 'CoupDEnvoi/1.0 (contact: tsekou473@gmail.com)', 'Accept': 'application/json' }, signal: ctl.signal });
@@ -1328,6 +1328,21 @@ async function wikiText(lang, terms, suffixes, ok) {
     }
   }
   return null;
+}
+
+
+const WIKI_BAD = new Set(['campus','stade','stadium','academy','academie','women','feminin','femenino','feminine','ultras','supporters','derby','histoire','history','saison','season','centre','center','formation','youth','reserves','reserve','ii','iii','u19','u21','u23','b','ladies','basketball','handball','rugby','volleyball','hockey','futsal','esports']);
+const WIKI_STOP = new Set(['football','club','fc','cf','afc','sc','ac','as','de','du','la','le','the','of','and','et','y','e','sporting']);
+function wikiToks(x, drop) { return fold(String(x || '').replace(/\(.*?\)/g, ' ')).replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w && !(drop && drop.has(w))); }
+// la page est-elle bien celle du club « term » ? (et pas son centre de formation, son stade, sa section féminine…)
+function wikiTitleIsClub(title, terms) {
+  const A = wikiToks(title, WIKI_STOP);
+  if (!A.length || A.some(w => WIKI_BAD.has(w))) return false;
+  return terms.some(t => {
+    const B = wikiToks(t, WIKI_STOP); if (!B.length) return false;
+    if (!B.every(w => A.includes(w))) return false;
+    return A.filter(w => !B.includes(w)).length <= 2;
+  });
 }
 
 // GET /api/club?name=Arsenal&lang=fr
@@ -1364,10 +1379,9 @@ app.get('/api/club', async (req, res) => {
       text: shortText(pickText(t, lang, 'strDescription'), 1800)
     };
     // texte d'histoire : Wikipédia (dans la langue de l'app), sinon celui de TheSportsDB
-    const core = fold(base).replace(/[^a-z0-9 ]/g, '').trim();
-    const coreWords = core.split(/\s+/).filter(w => w.length > 2);
-    const wk = await wikiText(lang, [t ? t.strTeam : name, ...terms.filter(x => x !== name && x !== (t && t.strTeam))].slice(0, 3), ['football club', 'club de football'],
-      pg => FOOT_RE.test((pg.extract || '').slice(0, 600) + ' ' + (pg.description || '')) && coreWords.some(w => fold(pg.title).includes(w)) && !/\b(season|saison|temporada|stagione|sezon|women|féminin|femenino)\b/i.test(pg.title));
+    const wterms = [...new Set([t ? t.strTeam : null, name, ...terms, base].filter(Boolean))];
+    const wk = await wikiText(lang, wterms.slice(0, 3), ['football club', 'club de football'],
+      pg => FOOT_RE.test((pg.extract || '').slice(0, 600) + ' ' + (pg.description || '')) && wikiTitleIsClub(pg.title, wterms));
     if (wk) { club = club || { name: wk.title, formed: null, stadium: '', location: '', country: '', league: '' }; club.text = wk.text; club.source = 'wikipedia'; }
     if (tsdbDown && !club) { const e = new Error('limite'); e.paused = true; histBlockedUntil = Date.now() + 20 * 1000; throw e; }
     if (!req.query.debug) histSet(key, club, club ? HIST_TTL : HIST_MISS_TTL);
