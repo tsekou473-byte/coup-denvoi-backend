@@ -1666,7 +1666,7 @@ app.get('/api/h2h', async (req, res) => {
         const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_H2H&firstTeamId=${encodeURIComponent(a)}&secondTeamId=${encodeURIComponent(b)}`, 24 * 3600 * 1000);
         const list = arr(raw.firstTeam_VS_secondTeam || (raw.result && raw.result.firstTeam_VS_secondTeam));
         const games = list.map(x => ({
-          date: x.match_date, homeId: String(x.match_hometeam_id || ''), awayId: String(x.match_awayteam_id || ''),
+          id: x.match_id ? String(x.match_id) : '', time: x.match_time || '', leagueId: x.league_id ? String(x.league_id) : '', date: x.match_date, homeId: String(x.match_hometeam_id || ''), awayId: String(x.match_awayteam_id || ''),
           home: x.match_hometeam_name, away: x.match_awayteam_name, hs: toNum(x.match_hometeam_score), as: toNum(x.match_awayteam_score), league: x.league_name || ''
         })).filter(g => g.hs != null && g.as != null);
         out = summarizeH2H(games, a); source = 'p1';
@@ -1677,7 +1677,7 @@ app.get('/api/h2h', async (req, res) => {
           const today = new Date().toISOString().slice(0, 10);
           const rawA = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=2005-01-01&to=${today}&team_id=${encodeURIComponent(a)}`, 7 * 24 * 3600 * 1000);
           const listA = asList(rawA).filter(x => [String(x.match_hometeam_id), String(x.match_awayteam_id)].includes(String(b)));
-          const g2 = listA.map(x => ({ date: x.match_date, homeId: String(x.match_hometeam_id || ''), awayId: String(x.match_awayteam_id || ''),
+          const g2 = listA.map(x => ({ id: x.match_id ? String(x.match_id) : '', time: x.match_time || '', leagueId: x.league_id ? String(x.league_id) : '', date: x.match_date, homeId: String(x.match_hometeam_id || ''), awayId: String(x.match_awayteam_id || ''),
             home: x.match_hometeam_name, away: x.match_awayteam_name, hs: toNum(x.match_hometeam_score), as: toNum(x.match_awayteam_score), league: x.league_name || '' }))
             .filter(g => g.hs != null && g.as != null);
           dbg.push('hist: total ' + asList(rawA).length + ', contre B ' + listA.length);
