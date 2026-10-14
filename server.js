@@ -891,6 +891,39 @@ async function addFeed(detail, debug) {
   } catch (e) { console.warn('Fil direct :', e.message); return null; }
 }
 
+
+/* ---------- JOUEURS SORTIS SUR BLESSURE (remplacement « because of an injury ») ---------- */
+async function addInjuries(detail, debug) {
+  try {
+    if (!(detail.status === 'live' || detail.status === 'final') || typeof detail.ts !== 'number') return null;
+    const key = await espnFindKey(detail);
+    if (!key) return debug ? { key: null } : null;
+    const [slug, id] = String(key).split('~');
+    const data = await espnGet(`${ESPN_BASE}/${slug}/summary?event=${encodeURIComponent(id)}`, d => {
+      const t = d && d.header && d.header.competitions && d.header.competitions[0] && d.header.competitions[0].status;
+      return (t && t.type && t.type.state === 'post') ? 60 * 60 * 1000 : 30 * 1000;
+    });
+    const hc = arr(data.header && data.header.competitions)[0] || {};
+    const nm = side => { const c = arr(hc.competitors).find(x => x.homeAway === side) || {}; return fold((c.team && (c.team.displayName || c.team.name)) || ''); };
+    const hn = nm('home'), an = nm('away');
+    const list = [], seen = new Set();
+    const consider = (time, text, teamName) => {
+      text = String(text || '').replace(/\s+/g, ' ').trim();
+      const m = text.match(/(?:^|\.\s)([^.]+?) replaces ([^.]+?)(?: (?:because of|due to) (?:an? )?injur\w*)/i);
+      if (!m) return;
+      const out = m[2].trim(), inn = m[1].replace(/^Substitution,\s*[^.]*\.\s*/i, '').trim();
+      const k = fold(out); if (seen.has(k)) return; seen.add(k);
+      const t = fold(teamName || text);
+      const team = t && hn && (hn.includes(t) || t.includes(hn)) ? 'home' : (t && an && (an.includes(t) || t.includes(an)) ? 'away' : (fold(text).includes(hn) && !fold(text).includes(an) ? 'home' : (fold(text).includes(an) && !fold(text).includes(hn) ? 'away' : '')));
+      list.push({ time: cleanClock(time), team, player: out, replacedBy: inn });
+    };
+    arr(data.commentary).forEach(c => consider(c.time && c.time.displayValue, c.text, c.play && c.play.team && (c.play.team.displayName || c.play.team.name)));
+    arr(data.keyEvents).forEach(e => consider(e.clock && e.clock.displayValue, e.text || e.shortText, e.team && (e.team.displayName || e.team.name)));
+    if (debug) return { key, list, names: [hn, an] };
+    return list.length ? list : null;
+  } catch (e) { console.warn('Blessures :', e.message); return null; }
+}
+
 async function enrichFromEspn(detail) {
   try {
     const noLu = !(detail.lineups.home.starters.length || detail.lineups.away.starters.length);
@@ -1331,6 +1364,9 @@ app.get('/api/match', async (req, res) => {
     const vr = await addVar(det);
     if (vr) det.varEvents = vr;
     if (req.query.feeddbg) return res.json(await addFeed(det, true));
+    if (req.query.injdbg) return res.json(await addInjuries(det, true));
+    const ij = await addInjuries(det);
+    if (ij) det.injuries = ij;
     const fd = await addFeed(det);
     if (fd) det.feed = fd;
     res.json(det);
@@ -1797,12 +1833,32 @@ async function loadNews(){
   return newsCache.items; // en cas d'échec : dernière copie
 }
 const TRANSFER_RE = /transfert|mercato|recrue|recrut|signe|signature|prêt|prete|libre|offre|rumeur|piste|contrat|prolong|accord|officiel|quitte|départ|arriv|clause|indemnit/i;
+
+const CLUB_ALIAS = {
+  'psg': ['psg', 'paris saint-germain', 'paris saint germain', 'paris sg'], 'paris saint germain': ['psg', 'paris saint-germain', 'paris sg'], 'paris sg': ['psg', 'paris saint-germain', 'paris sg'],
+  'marseille': ['marseille', 'olympique de marseille'], 'olympique marseille': ['marseille'], 'lyon': ['olympique lyonnais', 'lyon'], 'olympique lyonnais': ['olympique lyonnais', 'lyon'],
+  'man city': ['manchester city', 'man city'], 'manchester city': ['manchester city', 'man city'], 'man utd': ['manchester united', 'man united', 'man utd'], 'manchester united': ['manchester united', 'man united', 'man utd'],
+  'barcelona': ['barcelone', 'barcelona', 'barca'], 'fc barcelona': ['barcelone', 'barcelona', 'barca'], 'bayern munich': ['bayern'], 'bayern': ['bayern'], 'atletico madrid': ['atletico madrid', 'atletico de madrid'], 'inter': ['inter milan', 'inter de milan'], 'ac milan': ['ac milan'], 'juventus': ['juventus', 'juve'],
+  'borussia dortmund': ['dortmund'], 'tottenham': ['tottenham', 'spurs'], 'aston villa': ['aston villa'], 'newcastle': ['newcastle'], 'as monaco': ['monaco'], 'monaco': ['monaco'], 'lille': ['lille', 'losc'], 'lens': ['rc lens', 'lens'], 'nice': ['ogc nice', 'ogcn']
+};
+const GENERIC_FIRST = new Set(['manchester', 'borussia', 'atletico', 'athletic', 'sporting', 'olympique', 'racing', 'deportivo', 'newcastle', 'real', 'inter']);
+function clubNewsMatcher(name) {
+  const n = fold(name).replace(/[^a-z0-9 ]/g, ' ').replace(/\b(fc|cf|sc|ac|as|afc|ssc|rc|ogc|club|de)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  const raw = fold(name).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const terms = new Set([...(CLUB_ALIAS[raw] || []), ...(CLUB_ALIAS[n] || [])]);
+  if (n.length >= 4) terms.add(n);
+  const w = n.split(' ');
+  if (w.length >= 2 && w[0].length >= 6 && !GENERIC_FIRST.has(w[0])) terms.add(w[0]);
+  const res = [...terms].filter(t => t.length >= 3).map(t => new RegExp('(^|[^a-z0-9])' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '[ -]') + '([^a-z0-9]|$)'));
+  return item => { const t = fold(item.title).replace(/[^a-z0-9 -]/g, ' '); return res.some(r => r.test(t)); };
+}
 // GET /api/news?type=infos|transferts
 app.get('/api/news', async (req, res) => {
   try {
     let items = await loadNews();
     if (req.query.type === 'transferts') items = items.filter(i => TRANSFER_RE.test(i.title));
-    res.json({ items: items.slice(0, 40) });
+    if (req.query.club) items = items.filter(clubNewsMatcher(String(req.query.club)));
+    res.json({ items: items.slice(0, req.query.club ? 8 : 40) });
   } catch (err) {
     res.status(500).json({ error: err.message || String(err) });
   }
