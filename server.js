@@ -1398,9 +1398,8 @@ app.get('/api/match', async (req, res) => {
     if (req.query.injdbg) return res.json(await addInjuries(det, true));
     const ij = await addInjuries(det);
     if (ij) det.injuries = ij;
-    let fd = await addFeed(det);
-    if (det.status === 'live') fd = mergeProviderFeed(det, fd);
-    if (fd) det.feed = fd;
+    // fil « En direct » désactivé (données gratuites trop en retard) : addFeed / mergeProviderFeed gardés pour plus tard
+    if (process.env.FEED_ON === '1') { let fd = await addFeed(det); if (det.status === 'live') fd = mergeProviderFeed(det, fd); if (fd) det.feed = fd; }
     res.json(det);
   } catch (err) {
     console.error(err);
