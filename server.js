@@ -1919,8 +1919,9 @@ app.get('/api/odds', async (req, res) => {
   const { match, date } = req.query;
   if (!match || !/^\d{4}-\d{2}-\d{2}$/.test(date || '') || isAfr(String(match))) return res.json({ o1: null });
   try {
-    const o = (await dayOdds(date))[String(match)];
-    if (!o) return res.json({ o1: null });
+    const all = await dayOdds(date);
+    const o = all[String(match)];
+    if (!o) return res.json(req.query.debug ? { o1: null, matchesWithOdds: Object.keys(all).length, sampleIds: Object.keys(all).slice(0, 5) } : { o1: null });
     const r2 = v => Math.round(v * 100) / 100;
     res.json({ o1: r2(o.o1), ox: r2(o.ox), o2: r2(o.o2), n: o.n });
   } catch (e) {
