@@ -760,6 +760,29 @@ app.get('/api/espn-debug', async (req, res) => {
 /* Compositions / événements / statistiques de secours via ESPN pour les matchs du fournisseur 1 */
 const ESPN_EURO = ['uefa.champions', 'uefa.europa', 'uefa.europa.conf', 'eng.1', 'esp.1', 'ita.1', 'ger.1', 'fra.1', 'por.1', 'ned.1', 'bel.1', 'tur.1', 'sco.1', 'eng.2', 'eng.fa', 'eng.league_cup', 'esp.copa_del_rey', 'ger.dfb_pokal', 'ita.coppa_italia', 'fra.coupe_de_france', 'uefa.nations', 'uefa.euro', 'uefa.euroq', 'fifa.world', 'fifa.worldq.uefa', 'fifa.friendly'];
 const espnFound = new Map();   // id du match -> { at, key }
+/* Temps additionnel : le fournisseur principal envoie « 90+ » sans le nombre ; ESPN donne « 90'+3' » (au plus 8 matchs, cache 15 s) */
+async function fixStoppage(games) {
+  try {
+    const todo = games.filter(g => g && g.status === 'live' && /^\d+\+$/.test(String(g.minute || '')) && typeof g.ts === 'number').slice(0, 8);
+    await Promise.all(todo.map(async g => {
+      try {
+        const key = await espnFindKey(g);
+        if (!key) return;
+        const [slug, id] = String(key).split('~');
+        const data = await espnGet(`${ESPN_BASE}/${slug}/summary?event=${encodeURIComponent(id)}`, d => {
+          const t = d && d.header && d.header.competitions && d.header.competitions[0] && d.header.competitions[0].status;
+          return (t && t.type && t.type.state === 'post') ? 60 * 60 * 1000 : 15 * 1000;
+        });
+        const st = arr(data.header && data.header.competitions)[0];
+        const clock = cleanClock(st && st.status && st.status.displayClock);
+        const m = clock.match(/^(\d+)\+(\d+)$/);
+        if (m && m[1] === String(g.minute).replace('+', '')) g.minute = `${m[1]}+${m[2]}`;
+      } catch (e) { /* on garde « 90+ » */ }
+    }));
+  } catch (e) { /* idem */ }
+  return games;
+}
+
 async function espnFindKey(g) {
   const hit = espnFound.get(g.id);
   if (hit && Date.now() - hit.at < (hit.key ? 60 : 3) * 60 * 1000) return hit.key;
@@ -1119,6 +1142,7 @@ app.get('/api/fixtures', async (req, res) => {
       } catch (e) { console.warn('Matchs africains indisponibles :', e.message); }
     }
     if (p1err && !games.length) throw p1err;
+    await fixStoppage(games);
     res.json({ games, count: games.length, partial: p1err ? true : undefined });
   } catch (err) {
     console.error(err);
@@ -1391,6 +1415,7 @@ app.get('/api/match', async (req, res) => {
     const item = asList(raw).find(x => String(x.match_id) === String(id));
     if (!item) return res.status(404).json({ error: 'Match introuvable.', detail: 'Aucun match avec cet identifiant à cette date.' });
     const det = await enrichFromEspn(mapDetail(item));
+    await fixStoppage([det]);
     if (req.query.vardbg) return res.json(await addVar(det, true));
     const vr = await addVar(det);
     if (vr) det.varEvents = vr;
