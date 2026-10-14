@@ -892,6 +892,25 @@ async function addFeed(detail, debug) {
 }
 
 
+/* Le fournisseur principal annonce buts/cartons plus vite qu'ESPN : on les ajoute au fil s'ils n'y sont pas encore */
+function mergeProviderFeed(detail, feed) {
+  const mv = t => { const m = String(t || '').match(/(\d+)(?:\D+(\d+))?/); return m ? Number(m[1]) + (m[2] ? Number(m[2]) / 100 : 0) : 0; };
+  const list = (feed || []).slice();
+  const add = (time, kind, team, player) => {
+    const v = mv(time);
+    if (list.some(x => x.kind === kind && x.team === team && Math.abs(mv(x.time) - v) < 2.5)) return;
+    const t = String(time || '').replace(/[^\d+]/g, '');
+    list.push({ time: t ? t.replace(/^(\d+)(\+(\d+))?$/, (a, b, c, d) => d ? `${b}'+${d}` : `${b}'`) : '', kind, team, player: player || '', _p: 1 });
+  };
+  arr(detail.goals).forEach(g => add(g.time, 'goal', g.team, g.player));
+  arr(detail.cards).forEach(c => add(c.time, c.card === 'red' ? 'red' : 'yellow', c.team, c.player));
+  arr(detail.subs).forEach(x => add(x.time, 'sub', x.team, x.in || x.out));
+  if (!list.length) return null;
+  const idx = new Map(list.map((x, i) => [x, i]));
+  list.sort((a, b) => (mv(b.time) - mv(a.time)) || ((a._p ? 1 : 0) - (b._p ? 1 : 0)) || (idx.get(a) - idx.get(b)));
+  return list.slice(0, 60).map(({ _p, ...x }) => x);
+}
+
 /* ---------- JOUEURS SORTIS SUR BLESSURE (remplacement « because of an injury ») ---------- */
 async function addInjuries(detail, debug) {
   try {
@@ -1367,7 +1386,8 @@ app.get('/api/match', async (req, res) => {
     if (req.query.injdbg) return res.json(await addInjuries(det, true));
     const ij = await addInjuries(det);
     if (ij) det.injuries = ij;
-    const fd = await addFeed(det);
+    let fd = await addFeed(det);
+    if (det.status === 'live') fd = mergeProviderFeed(det, fd);
     if (fd) det.feed = fd;
     res.json(det);
   } catch (err) {
