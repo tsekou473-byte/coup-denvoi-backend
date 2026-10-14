@@ -988,6 +988,35 @@ app.get('/api/competitions', async (req, res) => {
 });
 
 // GET /api/standings?league_id=152 (ou afr:12) → classement d'une compétition
+// GET /api/standings-at?league_id=3&date=2019-03-17 → classement tel qu'il était la veille de cette date (calculé à partir des matchs de la saison)
+app.get('/api/standings-at', async (req, res) => {
+  try {
+    const { league_id, date } = req.query;
+    if (!league_id || !/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return res.status(400).json({ error: 'Paramètres league_id et date requis.' });
+    if (isAfr(league_id)) return res.json({ rows: [], note: "Classement de l'époque indisponible pour cette compétition." });
+    const y = +date.slice(0, 4), m = +date.slice(5, 7);
+    const start = (m >= 7 ? y : y - 1) + '-07-01';
+    const end = new Date(Date.parse(date + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+    if (end < start) return res.json({ rows: [], note: 'Début de saison : aucun match joué avant celui-ci.' });
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=${start}&to=${end}&league_id=${encodeURIComponent(league_id)}`, 30 * 24 * 3600 * 1000);
+    const now = new Date();
+    const games = asList(raw).map(x => mapGame(x, now)).filter(g => g.status === 'final' && g.hs != null && g.as != null && g.date < date && !/play-?off|final|round of|1\/|knockout|qualif/i.test(String((asList(raw).find(x => String(x.match_id) === String(g.id)) || {}).match_round || '')));
+    const T = new Map();
+    const row = (id, name, badge) => { const k = id || name; if (!T.has(k)) T.set(k, { teamId: id, team: name, badge: badge || null, played: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0, zone: '', stage: '' }); return T.get(k); };
+    for (const g of games) {
+      const h = row(g.homeId, g.home, g.homeLogo), a = row(g.awayId, g.away, g.awayLogo);
+      const hs = +g.hs, as = +g.as;
+      h.played++; a.played++; h.gf += hs; h.ga += as; a.gf += as; a.ga += hs;
+      if (hs > as) { h.w++; a.l++; h.pts += 3; } else if (hs < as) { a.w++; h.l++; a.pts += 3; } else { h.d++; a.d++; h.pts++; a.pts++; }
+    }
+    const rows = [...T.values()].sort((x, y2) => y2.pts - x.pts || (y2.gf - y2.ga) - (x.gf - x.ga) || y2.gf - x.gf || String(x.team).localeCompare(String(y2.team))).map((r, i) => ({ ...r, pos: i + 1 }));
+    res.json({ rows, count: rows.length, asOf: end });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur lors du calcul du classement de l'époque.", detail: err.message || String(err) });
+  }
+});
+
 app.get('/api/standings', async (req, res) => {
   try {
     const { league_id, season } = req.query;
