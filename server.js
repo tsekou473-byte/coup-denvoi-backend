@@ -1329,6 +1329,23 @@ app.get('/api/standings', async (req, res) => {
   }
 });
 
+// GET /api/teams?league_id=3 → équipes d'une compétition (même appel que l'effectif : pas de requête de plus)
+app.get('/api/teams', async (req, res) => {
+  try {
+    const { league_id } = req.query;
+    if (!league_id) return res.status(400).json({ error: 'Paramètre league_id manquant.' });
+    if (isAfr(league_id)) return res.json({ teams: [], note: 'Liste des équipes indisponible pour cette compétition.' });
+    let list = [];
+    try { list = asList(await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_teams&league_id=${encodeURIComponent(league_id)}`, 6 * 60 * 60 * 1000)); }
+    catch (err) { if (err.status !== 404) throw err; }
+    const teams = list.filter(t => t && t.team_key && t.team_name).map(t => ({ id: String(t.team_key), name: t.team_name, badge: t.team_badge || null })).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    res.json({ teams, count: teams.length });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors de la récupération des équipes.', detail: err.message || String(err) });
+  }
+});
+
 // GET /api/comp-stats?league_id=3 → résumé de la saison d'une compétition (calculé à partir des matchs de la saison en cours)
 app.get('/api/comp-stats', async (req, res) => {
   try {
@@ -1343,7 +1360,7 @@ app.get('/api/comp-stats', async (req, res) => {
     const out = { played: 0, goals: 0, homeWins: 0, awayWins: 0, draws: 0, yellow: 0, red: 0, common: null, biggest: null, mostYellow: null, mostRed: null, cleanSheets: 0 };
     const freq = new Map(), yel = new Map(), red = new Map();
     const pk = nm => { const w = fold(String(nm || '').replace(/\(.*?\)/g, ' ')).split(/\s+/).filter(Boolean); return w.length ? (w[0][0] + '|' + w[w.length - 1]) : ''; };
-    const addC = (m, name, teamId, team) => { const k = teamId + '|' + pk(name); if (!pk(name)) return; const e = m.get(k) || { name, team, teamId: String(teamId), n: 0 }; if (String(name).length > e.name.length) e.name = name; e.n++; m.set(k, e); };
+    const addC = (m, name, teamId, team, badge) => { const k = teamId + '|' + pk(name); if (!pk(name)) return; const e = m.get(k) || { name, team, teamId: String(teamId), badge: badge || null, n: 0 }; if (String(name).length > e.name.length) e.name = name; e.n++; m.set(k, e); };
     const now2 = new Date();
     for (const x of items) {
       const g = mapGame(x, now2);
@@ -1359,7 +1376,8 @@ app.get('/api/comp-stats', async (req, res) => {
       for (const c of arr(x.cards)) {
         const home = !!c.home_fault, nm = c.home_fault || c.away_fault; if (!nm) continue;
         const tid = home ? x.match_hometeam_id : x.match_awayteam_id, tn = home ? x.match_hometeam_name : x.match_awayteam_name;
-        if (/red/i.test(c.card || '')) { out.red++; addC(red, nm, tid, tn); } else { out.yellow++; addC(yel, nm, tid, tn); }
+        const bd = home ? (x.team_home_badge || x.match_hometeam_badge) : (x.team_away_badge || x.match_awayteam_badge);
+        if (/red/i.test(c.card || '')) { out.red++; addC(red, nm, tid, tn, bd); } else { out.yellow++; addC(yel, nm, tid, tn, bd); }
       }
     }
     if (out.played) {
@@ -1393,10 +1411,10 @@ app.get('/api/topscorers', async (req, res) => {
       const P = new Map();
       const pk = nm => { const w = fold(String(nm || '').replace(/\(.*?\)/g, ' ')).split(/\s+/).filter(Boolean); return w.length ? (w[0][0] + '|' + w[w.length - 1]) : ''; };
       const clean = nm => String(nm || '').replace(/\(.*?\)/g, ' ').replace(/\s+/g, ' ').trim();
-      const bump = (name, teamId, team, field) => {
+      const bump = (name, teamId, team, field, badge) => {
         const c = clean(name), k = pk(c); if (!k) return;
         const key = teamId + '|' + k;
-        const e = P.get(key) || { name: c, team, teamId: String(teamId), goals: 0, assists: 0, pens: 0 };
+        const e = P.get(key) || { name: c, team, teamId: String(teamId), badge: badge || null, goals: 0, assists: 0, pens: 0 };
         if (c.length > e.name.length) e.name = c;
         e[field]++;
         P.set(key, e);
@@ -1406,13 +1424,14 @@ app.get('/api/topscorers', async (req, res) => {
         for (const g of arr(x.goalscorer)) {
           const home = !!g.home_scorer || (!g.away_scorer && !!g.home_assist);
           const tid = home ? x.match_hometeam_id : x.match_awayteam_id, tn = home ? x.match_hometeam_name : x.match_awayteam_name;
+          const bd = home ? (x.team_home_badge || x.match_hometeam_badge) : (x.team_away_badge || x.match_awayteam_badge);
           const info = String(g.info || '');
           const sc = g.home_scorer || g.away_scorer, as = g.home_assist || g.away_assist;
-          if (sc && !/own/i.test(info)) { bump(sc, tid, tn, 'goals'); if (/pen/i.test(info)) bump(sc, tid, tn, 'pens'); }
-          if (as && !/own/i.test(info)) bump(as, tid, tn, 'assists');
+          if (sc && !/own/i.test(info)) { bump(sc, tid, tn, 'goals', bd); if (/pen/i.test(info)) bump(sc, tid, tn, 'pens', bd); }
+          if (as && !/own/i.test(info)) bump(as, tid, tn, 'assists', bd);
         }
       }
-      rows = [...P.values()].filter(e => e.goals || e.assists).sort((a, b) => b.goals - a.goals || b.assists - a.assists || a.name.localeCompare(b.name)).map((e, i) => ({ pos: i + 1, name: e.name, playerId: '', team: e.team, teamId: e.teamId, goals: e.goals, assists: e.assists, pens: e.pens }));
+      rows = [...P.values()].filter(e => e.goals || e.assists).sort((a, b) => b.goals - a.goals || b.assists - a.assists || a.name.localeCompare(b.name)).map((e, i) => ({ pos: i + 1, name: e.name, playerId: '', team: e.team, teamId: e.teamId, badge: e.badge, goals: e.goals, assists: e.assists, pens: e.pens }));
     } catch (err) { if (err.status !== 404) console.warn('Buteurs (calcul) :', err.message); }
     let list = [];
     if (!rows.length) {
