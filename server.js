@@ -1329,6 +1329,53 @@ app.get('/api/standings', async (req, res) => {
   }
 });
 
+// GET /api/comp-stats?league_id=3 → résumé de la saison d'une compétition (calculé à partir des matchs de la saison en cours)
+app.get('/api/comp-stats', async (req, res) => {
+  try {
+    const { league_id } = req.query;
+    if (!league_id) return res.status(400).json({ error: 'Paramètre league_id manquant.' });
+    if (isAfr(league_id)) return res.json({ played: 0, note: 'Résumé indisponible pour cette compétition.' });
+    const now = new Date(), y = now.getUTCFullYear(), mo = now.getUTCMonth() + 1;
+    const start = (mo >= 7 ? y : y - 1) + '-07-01', end = dayIso(0);
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=${start}&to=${end}&league_id=${encodeURIComponent(league_id)}`, 30 * 60 * 1000);
+    const KOF = /qualif|prelim/i;
+    const items = asList(raw).filter(x => x && !KOF.test(String(x.match_round || '') + ' ' + String(x.stage_name || '')));
+    const out = { played: 0, goals: 0, homeWins: 0, awayWins: 0, draws: 0, yellow: 0, red: 0, common: null, biggest: null, mostYellow: null, mostRed: null, cleanSheets: 0 };
+    const freq = new Map(), yel = new Map(), red = new Map();
+    const pk = nm => { const w = fold(String(nm || '').replace(/\(.*?\)/g, ' ')).split(/\s+/).filter(Boolean); return w.length ? (w[0][0] + '|' + w[w.length - 1]) : ''; };
+    const addC = (m, name, teamId, team) => { const k = teamId + '|' + pk(name); if (!pk(name)) return; const e = m.get(k) || { name, team, teamId: String(teamId), n: 0 }; if (String(name).length > e.name.length) e.name = name; e.n++; m.set(k, e); };
+    const now2 = new Date();
+    for (const x of items) {
+      const g = mapGame(x, now2);
+      if (g.status !== 'final' || g.hs == null || g.as == null) continue;
+      const hs = +g.hs, as = +g.as;
+      if (isNaN(hs) || isNaN(as)) continue;
+      out.played++; out.goals += hs + as;
+      if (hs > as) out.homeWins++; else if (hs < as) out.awayWins++; else out.draws++;
+      if (hs === 0 || as === 0) out.cleanSheets++;
+      const sc = Math.max(hs, as) + '-' + Math.min(hs, as);
+      freq.set(sc, (freq.get(sc) || 0) + 1);
+      if (!out.biggest || hs + as > out.biggest.hs + out.biggest.as) out.biggest = { home: g.home, away: g.away, homeLogo: g.homeLogo || null, awayLogo: g.awayLogo || null, hs, as, date: g.date };
+      for (const c of arr(x.cards)) {
+        const home = !!c.home_fault, nm = c.home_fault || c.away_fault; if (!nm) continue;
+        const tid = home ? x.match_hometeam_id : x.match_awayteam_id, tn = home ? x.match_hometeam_name : x.match_awayteam_name;
+        if (/red/i.test(c.card || '')) { out.red++; addC(red, nm, tid, tn); } else { out.yellow++; addC(yel, nm, tid, tn); }
+      }
+    }
+    if (out.played) {
+      out.gpm = Math.round(out.goals / out.played * 100) / 100;
+      const top = [...freq.entries()].sort((a, b) => b[1] - a[1])[0];
+      out.common = { score: top[0], times: top[1] };
+      const best = m => [...m.values()].sort((a, b) => b.n - a.n)[0] || null;
+      out.mostYellow = best(yel); out.mostRed = best(red);
+    }
+    res.json(out);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors du calcul du résumé.', detail: err.message || String(err) });
+  }
+});
+
 // GET /api/topscorers?league_id=152 → meilleurs buteurs et passeurs d'une compétition
 app.get('/api/topscorers', async (req, res) => {
   try {
