@@ -2510,9 +2510,10 @@ async function notifyReminders(games) {
   for (const g of games) {
     if (g.status !== 'scheduled' || typeof g.ts !== 'number') continue;
     const left = g.ts - now;
-    if (left < 5 * 60 * 1000 || left > 75 * 60 * 1000) continue;
+    if (left < 5 * 60 * 1000 || left > 195 * 60 * 1000) continue;
     for (const entry of [...subs.values()]) {
       if (!watched(entry)(g) || (entry.types && entry.types.remind === false)) continue;
+      if (left > (entry.remindMin || 60) * 60 * 1000 + 15 * 60 * 1000) continue;
       if ((entry.preds || []).includes(String(g.id))) continue;
       const k = entry.sub.endpoint + '|' + g.id;
       if (reminded.has(k)) continue;
@@ -2557,7 +2558,7 @@ app.post('/api/push/sync', (req, res) => {
   const lang = Object.keys(PUSH_TXT.goal).includes(b.lang) ? b.lang : 'fr';
   const first = !subs.has(sub.endpoint);
   const t = b.types || {};
-  subs.set(sub.endpoint, { sub, teams: ids(b.teams), matches: ids(b.matches), preds: ids(b.preds).slice(0, 100), muted: ids(b.muted).slice(0, 100), lang, types: { goal: t.goal !== false, kickoff: t.kickoff !== false, final: t.final !== false, remind: t.remind !== false } });
+  subs.set(sub.endpoint, { sub, teams: ids(b.teams), matches: ids(b.matches), preds: ids(b.preds).slice(0, 100), muted: ids(b.muted).slice(0, 100), remindMin: [30, 60, 180].includes(Number(b.remindMin)) ? Number(b.remindMin) : 60, lang, types: { goal: t.goal !== false, kickoff: t.kickoff !== false, final: t.final !== false, remind: t.remind !== false } });
   saveSubs();
   // un abonné nouveau ou qui revient (ex. après un redémarrage du serveur) : on relève les matchs tout de suite
   if (Date.now() - lastKick > 20 * 1000) { lastKick = Date.now(); clearTimeout(pollTimer); pollTimer = setTimeout(pollOnce, 3000); }

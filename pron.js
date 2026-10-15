@@ -111,6 +111,22 @@ module.exports = function mountPron(app, D) {
     res.json({ code, name: db.groups[code].name });
   });
 
+  // défi : le groupe choisit jusqu'à 3 matchs ; classement séparé sur ces matchs
+  app.post('/api/pron/challenge', (req, res) => {
+    if (limited(req, res, 20)) return;
+    const b = req.body || {};
+    if (!okUid(b.uid)) return res.status(400).json({ error: 'Identifiant invalide.' });
+    const code = String(b.code || '').toUpperCase();
+    const g = okCode(code) && db.groups[code];
+    if (!g || !g.members.includes(b.uid)) return res.status(404).json({ error: 'Groupe introuvable.' });
+    const ms = (Array.isArray(b.matches) ? b.matches : []).slice(0, 3).filter(m => m && okId(m.id) && okDate(m.date) && Number.isFinite(Number(m.ts)))
+      .map(m => ({ id: String(m.id), home: clean(m.home, 40), away: clean(m.away, 40), ts: Number(m.ts), date: m.date }));
+    if (!ms.length) return res.status(400).json({ error: 'Choisis au moins un match.' });
+    g.challenge = { at: Date.now(), by: clean((db.users[b.uid] || {}).name, 20), matches: ms };
+    save();
+    res.json({ ok: true });
+  });
+
   // résultats : on garde les scores finaux déjà connus, on interroge le fournisseur (par jour, cache partagé avec /api/fixtures) pour le reste
   async function settle(dates) {
     const todo = [...dates].filter(okDate).slice(0, 10);
@@ -139,6 +155,7 @@ module.exports = function mountPron(app, D) {
       const members = g.members.map(uid => db.users[uid]).filter(Boolean);
       const need = new Set();
       members.forEach(u => Object.entries(u.preds).forEach(([id, p]) => { if (p.ts < now - 105 * 60 * 1000 && !db.results[id] && p.date && now - p.ts < 20 * 24 * 3600 * 1000) need.add(p.date); }));
+      if (g.challenge) g.challenge.matches.forEach(m => { if (m.ts < now - 105 * 60 * 1000 && !db.results[m.id]) need.add(m.date); });
       if (need.size) { await settle(need); save(); }
       const rows = members.map(u => {
         let pts = 0, exact = 0, ok = 0, n = 0;
@@ -155,7 +172,17 @@ module.exports = function mountPron(app, D) {
         byMatch.set(id, m);
       }));
       const reveals = [...byMatch.values()].sort((a, b) => b.ts - a.ts).slice(0, 8).map(m => ({ ...m, picks: m.picks.sort((a, b) => (b.pts || 0) - (a.pts || 0) || a.name.localeCompare(b.name)) }));
-      res.json({ code, name: g.name, members: members.length, rows, reveals });
+      let challenge = null;
+      if (g.challenge) {
+        const ids = g.challenge.matches.map(m => m.id);
+        const crow = g.members.map(uid => db.users[uid]).filter(Boolean).map(u => {
+          let pts = 0, n = 0, pending = 0;
+          ids.forEach(id => { const p = u.preds[id], r = db.results[id]; if (!p) return; if (r) { pts += points(p, r); n++; } else pending++; });
+          return { name: u.name, pts, n, pending };
+        }).sort((a, b) => b.pts - a.pts || a.name.localeCompare(b.name));
+        challenge = { by: g.challenge.by, matches: g.challenge.matches.map(m => ({ ...m, res: db.results[m.id] || null })), rows: crow };
+      }
+      res.json({ code, name: g.name, members: members.length, rows, reveals, challenge });
     } catch (e) {
       console.error('pron board', e);
       res.status(500).json({ error: 'Erreur du classement.' });
