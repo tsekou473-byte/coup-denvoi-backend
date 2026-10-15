@@ -1335,17 +1335,51 @@ app.get('/api/topscorers', async (req, res) => {
     const { league_id } = req.query;
     if (!league_id) return res.status(400).json({ error: 'Paramètre league_id manquant.' });
     if (isAfr(league_id)) return res.json({ rows: [], note: 'Statistiques des joueurs indisponibles pour cette compétition.' });
-    let list = [];
+    // Le classement « buteurs » du fournisseur mélange parfois plusieurs saisons ou compétitions : on le recalcule
+    // à partir des buts de chaque match de la saison en cours (même source que les fiches de match).
+    let rows = [];
     try {
-      const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_topscorers&league_id=${encodeURIComponent(league_id)}`, 30 * 60 * 1000);
-      list = asList(raw);
-    } catch (err) { if (err.status !== 404) throw err; }
-    const n = numOrNull;
-    const rows = list.filter(x => x && x.player_name).map((x, i) => ({
-      pos: n(x.player_place) ?? i + 1, name: x.player_name, playerId: x.player_key ? String(x.player_key) : '',
-      team: x.team_name || '', teamId: x.team_key ? String(x.team_key) : '',
-      goals: n(x.goals) ?? 0, assists: n(x.assists) ?? 0, pens: n(x.penalty_goals) ?? 0
-    }));
+      const now = new Date(), y = now.getUTCFullYear(), mo = now.getUTCMonth() + 1;
+      const start = (mo >= 7 ? y : y - 1) + '-07-01', end = dayIso(0);
+      const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=${start}&to=${end}&league_id=${encodeURIComponent(league_id)}`, 30 * 60 * 1000);
+      const KOF = /qualif|prelim/i;   // tours préliminaires : pas dans les statistiques de la phase principale
+      const P = new Map();
+      const pk = nm => { const w = fold(String(nm || '').replace(/\(.*?\)/g, ' ')).split(/\s+/).filter(Boolean); return w.length ? (w[0][0] + '|' + w[w.length - 1]) : ''; };
+      const clean = nm => String(nm || '').replace(/\(.*?\)/g, ' ').replace(/\s+/g, ' ').trim();
+      const bump = (name, teamId, team, field) => {
+        const c = clean(name), k = pk(c); if (!k) return;
+        const key = teamId + '|' + k;
+        const e = P.get(key) || { name: c, team, teamId: String(teamId), goals: 0, assists: 0, pens: 0 };
+        if (c.length > e.name.length) e.name = c;
+        e[field]++;
+        P.set(key, e);
+      };
+      for (const x of asList(raw)) {
+        if (KOF.test(String(x.match_round || '') + ' ' + String(x.stage_name || ''))) continue;
+        for (const g of arr(x.goalscorer)) {
+          const home = !!g.home_scorer || (!g.away_scorer && !!g.home_assist);
+          const tid = home ? x.match_hometeam_id : x.match_awayteam_id, tn = home ? x.match_hometeam_name : x.match_awayteam_name;
+          const info = String(g.info || '');
+          const sc = g.home_scorer || g.away_scorer, as = g.home_assist || g.away_assist;
+          if (sc && !/own/i.test(info)) { bump(sc, tid, tn, 'goals'); if (/pen/i.test(info)) bump(sc, tid, tn, 'pens'); }
+          if (as && !/own/i.test(info)) bump(as, tid, tn, 'assists');
+        }
+      }
+      rows = [...P.values()].filter(e => e.goals || e.assists).sort((a, b) => b.goals - a.goals || b.assists - a.assists || a.name.localeCompare(b.name)).map((e, i) => ({ pos: i + 1, name: e.name, playerId: '', team: e.team, teamId: e.teamId, goals: e.goals, assists: e.assists, pens: e.pens }));
+    } catch (err) { if (err.status !== 404) console.warn('Buteurs (calcul) :', err.message); }
+    let list = [];
+    if (!rows.length) {
+      try {
+        const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_topscorers&league_id=${encodeURIComponent(league_id)}`, 30 * 60 * 1000);
+        list = asList(raw);
+      } catch (err) { if (err.status !== 404) throw err; }
+      const n = numOrNull;
+      rows = list.filter(x => x && x.player_name).map((x, i) => ({
+        pos: n(x.player_place) ?? i + 1, name: x.player_name, playerId: x.player_key ? String(x.player_key) : '',
+        team: x.team_name || '', teamId: x.team_key ? String(x.team_key) : '',
+        goals: n(x.goals) ?? 0, assists: n(x.assists) ?? 0, pens: n(x.penalty_goals) ?? 0
+      }));
+    }
     const out = { rows, count: rows.length };
     if (!rows.length) { out.note = 'Aucune statistique de joueurs renvoyée par le fournisseur pour cette compétition.'; out.sampleKeys = list[0] ? Object.keys(list[0]).slice(0, 20) : []; }
     res.json(out);
