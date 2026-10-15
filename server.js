@@ -1448,7 +1448,7 @@ function buildBracket(items, now) {
     const S = stages.get(st.key) || { key: st.key, name: st.name, order: st.order, ties: new Map() };
     const T = S.ties.get(key) || { a: { id: g.homeId, name: g.home, badge: g.homeLogo || null }, b: { id: g.awayId, name: g.away, badge: g.awayLogo || null }, legs: [] };
     const aHome = String(g.homeId) === String(T.a.id);
-    T.legs.push({ id: g.id, date: g.date, time: g.time || '', status: g.status, minute: g.minute || null, aHome, hs: g.hs, as: g.as });
+    T.legs.push({ id: g.id, date: g.date, time: g.time || '', status: g.status, minute: g.minute || null, aHome, hs: g.hs, as: g.as, game: g });
     S.ties.set(key, T); stages.set(st.key, S);
   }
   return [...stages.values()].sort((p, q) => p.order - q.order).map(S => ({
