@@ -2502,6 +2502,26 @@ async function notifyEvents(events) {
     }
   }
 }
+// rappel de pronostic : ~1 h avant le coup d'envoi d'un match suivi sur lequel l'abonné n'a pas encore pronostiqué
+const REMIND_TXT = { fr:'🎯 Pas encore de pronostic', en:'🎯 No prediction yet', es:'🎯 Aún sin pronóstico', pt:'🎯 Ainda sem palpite', ar:'🎯 لا توجد توقعات بعد', de:'🎯 Noch kein Tipp', it:'🎯 Ancora nessun pronostico', tr:'🎯 Henüz tahmin yok' };
+const reminded = new Set();
+async function notifyReminders(games) {
+  const now = Date.now();
+  for (const g of games) {
+    if (g.status !== 'scheduled' || typeof g.ts !== 'number') continue;
+    const left = g.ts - now;
+    if (left < 5 * 60 * 1000 || left > 75 * 60 * 1000) continue;
+    for (const entry of [...subs.values()]) {
+      if (!watched(entry)(g) || (entry.types && entry.types.remind === false)) continue;
+      if ((entry.preds || []).includes(String(g.id))) continue;
+      const k = entry.sub.endpoint + '|' + g.id;
+      if (reminded.has(k)) continue;
+      reminded.add(k);
+      await pushTo(entry, { title: REMIND_TXT[entry.lang] || REMIND_TXT.fr, body: `${g.home} – ${g.away}`, tag: `remind-${g.id}`, url: './' });
+    }
+  }
+  if (reminded.size > 5000) reminded.clear();
+}
 // relève les matchs ; rythme adapté : vite quand un match suivi est en cours, lent sinon (économise le quota du fournisseur)
 let pollTimer = null;
 let lastKick = 0;
@@ -2513,6 +2533,7 @@ async function pollOnce() {
       const now = new Date();
       const games = asList(raw).map(item => mapGame(item, now));
       await notifyEvents(detectEvents(games));
+      await notifyReminders(games);
       const mine = games.filter(g => [...subs.values()].some(e => watched(e)(g)));
       if (mine.some(g => g.status === 'live')) wait = 75 * 1000;
       else {
@@ -2536,7 +2557,7 @@ app.post('/api/push/sync', (req, res) => {
   const lang = Object.keys(PUSH_TXT.goal).includes(b.lang) ? b.lang : 'fr';
   const first = !subs.has(sub.endpoint);
   const t = b.types || {};
-  subs.set(sub.endpoint, { sub, teams: ids(b.teams), matches: ids(b.matches), lang, types: { goal: t.goal !== false, kickoff: t.kickoff !== false, final: t.final !== false } });
+  subs.set(sub.endpoint, { sub, teams: ids(b.teams), matches: ids(b.matches), preds: ids(b.preds).slice(0, 100), lang, types: { goal: t.goal !== false, kickoff: t.kickoff !== false, final: t.final !== false, remind: t.remind !== false } });
   saveSubs();
   // un abonné nouveau ou qui revient (ex. après un redémarrage du serveur) : on relève les matchs tout de suite
   if (Date.now() - lastKick > 20 * 1000) { lastKick = Date.now(); clearTimeout(pollTimer); pollTimer = setTimeout(pollOnce, 3000); }
