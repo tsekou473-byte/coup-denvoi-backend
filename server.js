@@ -1329,6 +1329,32 @@ app.get('/api/standings', async (req, res) => {
   }
 });
 
+// GET /api/topscorers?league_id=152 → meilleurs buteurs et passeurs d'une compétition
+app.get('/api/topscorers', async (req, res) => {
+  try {
+    const { league_id } = req.query;
+    if (!league_id) return res.status(400).json({ error: 'Paramètre league_id manquant.' });
+    if (isAfr(league_id)) return res.json({ rows: [], note: 'Statistiques des joueurs indisponibles pour cette compétition.' });
+    let list = [];
+    try {
+      const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_topscorers&league_id=${encodeURIComponent(league_id)}`, 30 * 60 * 1000);
+      list = asList(raw);
+    } catch (err) { if (err.status !== 404) throw err; }
+    const n = numOrNull;
+    const rows = list.filter(x => x && x.player_name).map((x, i) => ({
+      pos: n(x.player_place) ?? i + 1, name: x.player_name, playerId: x.player_key ? String(x.player_key) : '',
+      team: x.team_name || '', teamId: x.team_key ? String(x.team_key) : '',
+      goals: n(x.goals) ?? 0, assists: n(x.assists) ?? 0, pens: n(x.penalty_goals) ?? 0
+    }));
+    const out = { rows, count: rows.length };
+    if (!rows.length) { out.note = 'Aucune statistique de joueurs renvoyée par le fournisseur pour cette compétition.'; out.sampleKeys = list[0] ? Object.keys(list[0]).slice(0, 20) : []; }
+    res.json(out);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors de la récupération des meilleurs joueurs.', detail: err.message || String(err) });
+  }
+});
+
 // GET /api/team?league_id=152&team_id=3103 (league_id peut être afr:12) → effectif d'une équipe
 
 /* Nationalité des joueurs du fournisseur 1 (souvent vide) : on la reprend de la fiche d'effectif ESPN du même club */
@@ -1930,6 +1956,10 @@ const IDX_MAX_LEAGUES = 45;
 const IDX_ALIAS = { 'psg': 'paris saint germain paris sg', 'man city': 'manchester city', 'man utd': 'manchester united', 'manchester utd': 'manchester united', 'atletico madrid': 'atletico de madrid', 'inter': 'internazionale inter milan', 'ac milan': 'milan' };
 const IDX_GAP_MS = 3000;
 const nrm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+/* Équipes nationales : on indexe aussi les compétitions de sélections (Coupe du monde, Euro, Ligue des nations, qualifications, amicaux…) */
+const NAT_COMP = /world cup|nations league|european championship|^euro\b|africa cup|copa america|asian cup|gold cup|qualif|friendl/i;
+const NAT_SKIP = /women|femin|u-?1\d|u-?2\d|youth|club|champions league|libertadores|sudamericana|conference|europa|super cup|supercup|beach|futsal/i;
+const NAT_FR = { germany:'allemagne', spain:'espagne', italy:'italie', england:'angleterre', scotland:'ecosse', wales:'pays de galles', 'northern ireland':'irlande du nord', ireland:'irlande', 'republic of ireland':'irlande', netherlands:'pays-bas', belgium:'belgique', switzerland:'suisse', austria:'autriche', denmark:'danemark', sweden:'suede', norway:'norvege', finland:'finlande', poland:'pologne', 'czech republic':'tchequie', czechia:'tchequie', slovakia:'slovaquie', hungary:'hongrie', romania:'roumanie', bulgaria:'bulgarie', greece:'grece', turkey:'turquie', croatia:'croatie', serbia:'serbie', slovenia:'slovenie', ukraine:'ukraine', russia:'russie', morocco:'maroc', algeria:'algerie', tunisia:'tunisie', egypt:'egypte', senegal:'senegal', 'ivory coast':"cote d'ivoire", "cote d'ivoire":"cote d'ivoire", cameroon:'cameroun', nigeria:'nigeria', ghana:'ghana', mali:'mali', 'dr congo':'rd congo', congo:'congo', 'south africa':'afrique du sud', 'cape verde':'cap-vert', 'burkina faso':'burkina faso', guinea:'guinee', gabon:'gabon', brazil:'bresil', argentina:'argentine', uruguay:'uruguay', colombia:'colombie', chile:'chili', peru:'perou', paraguay:'paraguay', ecuador:'equateur', venezuela:'venezuela', bolivia:'bolivie', mexico:'mexique', usa:'etats-unis', 'united states':'etats-unis', canada:'canada', 'costa rica':'costa rica', panama:'panama', jamaica:'jamaique', haiti:'haiti', japan:'japon', 'south korea':'coree du sud', 'korea republic':'coree du sud', china:'chine', iran:'iran', iraq:'irak', 'saudi arabia':'arabie saoudite', qatar:'qatar', uae:'emirats arabes unis', jordan:'jordanie', uzbekistan:'ouzbekistan', australia:'australie', 'new zealand':'nouvelle-zelande', iceland:'islande', albania:'albanie', 'bosnia and herzegovina':'bosnie-herzegovine', 'north macedonia':'macedoine du nord', montenegro:'montenegro', kosovo:'kosovo', israel:'israel', georgia:'georgie', armenia:'armenie', portugal:'portugal', france:'france' };
 async function buildIndex(){
   if (IDX.building) return;
   IDX.building = true;
@@ -1948,6 +1978,15 @@ async function buildIndex(){
     // championnats principaux d'abord
     picked.sort((a, b) => (mains.has(b.id) ? 1 : 0) - (mains.has(a.id) ? 1 : 0));
     const list = picked.slice(0, IDX_MAX_LEAGUES);
+    const natSeen = new Set(list.map(l => l.id));
+    const natList = [];
+    for (const x of all){
+      const id = String(x.league_id);
+      if (natSeen.has(id) || !NAT_COMP.test(x.league_name || '') || NAT_SKIP.test(x.league_name || '') || NAT_SKIP.test(x.country_name || '')) continue;
+      natSeen.add(id); natList.push({ id, name: x.league_name, country: x.country_name, nat: true });
+    }
+    natList.sort((a, b) => (/world cup/i.test(b.name) ? 1 : 0) - (/world cup/i.test(a.name) ? 1 : 0));
+    list.push(...natList.slice(0, 16));
     IDX.leagues = list.length; IDX.done = 0;
     const teams = [], players = [], seenTeam = new Set();
     for (const lg of list){
@@ -1959,7 +1998,8 @@ async function buildIndex(){
           if (seenTeam.has(key)) continue;
           seenTeam.add(key);
           const tm = { id: String(team.team_key), leagueId: lg.id, leagueName: lg.name, name: team.team_name, badge: team.team_badge || null, country: team.team_country || lg.country || null };
-          tm.n = nrm(tm.name + ' ' + (tm.country || '') + ' ' + (IDX_ALIAS[nrm(tm.name)] || ''));
+          if (lg.nat) tm.nat = true;
+          tm.n = nrm(tm.name + ' ' + (tm.country || '') + ' ' + (IDX_ALIAS[nrm(tm.name)] || '') + (lg.nat ? ' ' + (NAT_FR[String(tm.name).toLowerCase()] || '') + ' selection equipe nationale' : ''));
           teams.push(tm);
           for (const p of arr(team.players)){
             const mp = mapPlayer(p);
@@ -1989,7 +2029,7 @@ app.get('/api/search', (req, res) => {
   const match = n => words.every(w => n.includes(w));
   const startsFirst = (a, b) => (b.n.startsWith(q) ? 1 : 0) - (a.n.startsWith(q) ? 1 : 0);
   const teams = IDX.teams.filter(t => match(t.n)).sort(startsFirst).slice(0, 12)
-    .map(t => ({ id: t.id, leagueId: t.leagueId, leagueName: t.leagueName, name: t.name, badge: t.badge, country: t.country }));
+    .map(t => ({ id: t.id, leagueId: t.leagueId, leagueName: t.leagueName, name: t.name, badge: t.badge, country: t.country, national: t.nat ? true : undefined }));
   const players = IDX.players.filter(p => match(p.n)).sort(startsFirst).slice(0, 20)
     .map(p => ({ player: p.player, team: { id: p.team.id, leagueId: p.team.leagueId, name: p.team.name, badge: p.team.badge } }));
   res.json({ teams, players, indexed: IDX.done, total: IDX.leagues, building: IDX.building });
