@@ -2359,6 +2359,7 @@ async function notifyEvents(events) {
     const g = ev.g, hs = Number(g.hs) || 0, as = Number(g.as) || 0;
     for (const entry of [...subs.values()]) {
       if (!watched(entry)(g)) continue;
+      if (entry.types && entry.types[ev.type] === false) continue;
       const lang = entry.lang;
       const body = ev.type === 'kickoff' ? `${g.home} – ${g.away}` : `${g.home} ${hs}-${as} ${g.away}${ev.type === 'goal' && g.minute ? ` (${String(g.minute).replace(/^(\d+)$/, "$1'")})` : ''}`;
       await pushTo(entry, { title: (ev.type === 'goal' ? '⚽ ' : '') + ptxt(ev.type, lang), body, tag: `${ev.type}-${g.id}-${hs}-${as}`, url: './' });
@@ -2398,7 +2399,8 @@ app.post('/api/push/sync', (req, res) => {
   const ids = v => (Array.isArray(v) ? v : []).slice(0, 100).map(String);
   const lang = Object.keys(PUSH_TXT.goal).includes(b.lang) ? b.lang : 'fr';
   const first = !subs.has(sub.endpoint);
-  subs.set(sub.endpoint, { sub, teams: ids(b.teams), matches: ids(b.matches), lang });
+  const t = b.types || {};
+  subs.set(sub.endpoint, { sub, teams: ids(b.teams), matches: ids(b.matches), lang, types: { goal: t.goal !== false, kickoff: t.kickoff !== false, final: t.final !== false } });
   saveSubs();
   // un abonné nouveau ou qui revient (ex. après un redémarrage du serveur) : on relève les matchs tout de suite
   if (Date.now() - lastKick > 20 * 1000) { lastKick = Date.now(); clearTimeout(pollTimer); pollTimer = setTimeout(pollOnce, 3000); }
