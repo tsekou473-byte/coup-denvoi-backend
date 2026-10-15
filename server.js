@@ -2472,7 +2472,7 @@ async function pushTo(entry, payload) {
     return false;
   }
 }
-const watched = entry => g => entry.matches.includes(String(g.id)) || entry.teams.includes(String(g.homeId)) || entry.teams.includes(String(g.awayId));
+const watched = entry => g => { const mu = entry.muted || []; return entry.matches.includes(String(g.id)) || (entry.teams.includes(String(g.homeId)) && !mu.includes(String(g.homeId))) || (entry.teams.includes(String(g.awayId)) && !mu.includes(String(g.awayId))); };
 
 // état connu de chaque match : détecte coup d'envoi, buts, fin
 const seen = new Map();   // id -> { status, hs, as }
@@ -2557,7 +2557,7 @@ app.post('/api/push/sync', (req, res) => {
   const lang = Object.keys(PUSH_TXT.goal).includes(b.lang) ? b.lang : 'fr';
   const first = !subs.has(sub.endpoint);
   const t = b.types || {};
-  subs.set(sub.endpoint, { sub, teams: ids(b.teams), matches: ids(b.matches), preds: ids(b.preds).slice(0, 100), lang, types: { goal: t.goal !== false, kickoff: t.kickoff !== false, final: t.final !== false, remind: t.remind !== false } });
+  subs.set(sub.endpoint, { sub, teams: ids(b.teams), matches: ids(b.matches), preds: ids(b.preds).slice(0, 100), muted: ids(b.muted).slice(0, 100), lang, types: { goal: t.goal !== false, kickoff: t.kickoff !== false, final: t.final !== false, remind: t.remind !== false } });
   saveSubs();
   // un abonné nouveau ou qui revient (ex. après un redémarrage du serveur) : on relève les matchs tout de suite
   if (Date.now() - lastKick > 20 * 1000) { lastKick = Date.now(); clearTimeout(pollTimer); pollTimer = setTimeout(pollOnce, 3000); }
