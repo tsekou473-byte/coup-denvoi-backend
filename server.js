@@ -1070,6 +1070,7 @@ app.get('/api/afr-find', async (req, res) => {
 });
 
 require('./chat')(app);
+require('./pron')(app, { cachedFetch: (u, t) => cachedFetch(u, t), fixturesTtl: (a, b) => fixturesTtl(a, b), mapGame: (x, n) => mapGame(x, n), asList: r => asList(r), host: () => RAPIDAPI_HOST });
 
 app.get('/api/leagues', (req, res) => {
   res.json(Object.entries(LEAGUES).map(([code, l]) => ({ code, ...l })));
