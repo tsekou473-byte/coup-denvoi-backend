@@ -1420,6 +1420,59 @@ app.get('/api/teams', async (req, res) => {
   }
 });
 
+
+/* ---------- Phases finales : tableau (barrages, huitièmes, quarts, demies, finale) ---------- */
+const KO_STAGES = [
+  { re: /(3rd|third)[ -]place|bronze/i, skip: true },
+  { re: /semi|1\/2/i, key: 'sf', order: 4, name: 'Demi-finales' },
+  { re: /quarter|1\/4/i, key: 'qf', order: 3, name: 'Quarts de finale' },
+  { re: /round of 16|last 16|1\/8|8th[- ]final|octavos|achtelfinale/i, key: 'r16', order: 2, name: 'Huitièmes de finale' },
+  { re: /round of 32|last 32|1\/16/i, key: 'r32', order: 1.5, name: 'Seizièmes de finale' },
+  { re: /play-?off|knockout phase|knockout round|barrage/i, key: 'po', order: 1, name: 'Barrages' },
+  { re: /(^|[^a-z])final(?!s?\b.*(group))/i, key: 'f', order: 5, name: 'Finale' }
+];
+function koStage(text) {
+  const t = String(text || '');
+  if (/qualif|prelim|group|league phase|matchday|regular season/i.test(t) && !/knockout|play-?off|round of|final|quarter|semi/i.test(t)) return null;
+  for (const st of KO_STAGES) if (st.re.test(t)) return st.skip ? null : st;
+  return null;
+}
+function buildBracket(items, now) {
+  const stages = new Map();
+  for (const x of items) {
+    const st = koStage(`${x.match_round || ''} ${x.stage_name || ''}`);
+    if (!st) continue;
+    const g = mapGame(x, now);
+    if (!g.homeId || !g.awayId) continue;
+    const key = [g.homeId, g.awayId].sort().join('-');
+    const S = stages.get(st.key) || { key: st.key, name: st.name, order: st.order, ties: new Map() };
+    const T = S.ties.get(key) || { a: { id: g.homeId, name: g.home, badge: g.homeLogo || null }, b: { id: g.awayId, name: g.away, badge: g.awayLogo || null }, legs: [] };
+    const aHome = String(g.homeId) === String(T.a.id);
+    T.legs.push({ id: g.id, date: g.date, time: g.time || '', status: g.status, minute: g.minute || null, aHome, hs: g.hs, as: g.as });
+    S.ties.set(key, T); stages.set(st.key, S);
+  }
+  return [...stages.values()].sort((p, q) => p.order - q.order).map(S => ({
+    key: S.key, name: S.name, order: S.order,
+    ties: [...S.ties.values()].map(T => ({ ...T, legs: T.legs.sort((p, q) => String(p.date).localeCompare(String(q.date))) }))
+      .sort((p, q) => String(p.legs[0].date).localeCompare(String(q.legs[0].date)) || String(p.a.name).localeCompare(String(q.a.name)))
+  }));
+}
+app.get('/api/bracket', async (req, res) => {
+  try {
+    const { league_id } = req.query;
+    if (!league_id) return res.status(400).json({ error: 'Paramètre league_id manquant.' });
+    if (isAfr(league_id)) return res.json({ stages: [] });
+    const now = new Date(), y = now.getUTCFullYear(), mo = now.getUTCMonth() + 1;
+    const start = (mo >= 7 ? y : y - 1) + '-07-01', end = addIsoDays(dayIso(0), 240);
+    const raw = await cachedFetch(`https://${RAPIDAPI_HOST}/?action=get_events&from=${start}&to=${end}&league_id=${encodeURIComponent(league_id)}`, 30 * 60 * 1000);
+    res.json({ stages: buildBracket(asList(raw), now) });
+  } catch (err) {
+    if (err.status === 404) return res.json({ stages: [] });
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors de la récupération du tableau.', detail: err.message || String(err) });
+  }
+});
+
 // GET /api/comp-stats?league_id=3 → résumé de la saison d'une compétition (calculé à partir des matchs de la saison en cours)
 app.get('/api/comp-stats', async (req, res) => {
   try {
